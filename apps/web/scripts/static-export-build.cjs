@@ -31,6 +31,12 @@ try {
       NEXT_PUBLIC_WS_BASE_URL: 'ws://127.0.0.1:3847',
     },
   })
+  const outDir = path.join(process.cwd(), 'out')
+  const compatOutDir = path.join(process.cwd(), '../apps/web/out')
+  if (fs.existsSync(outDir)) {
+    fs.mkdirSync(path.dirname(compatOutDir), { recursive: true })
+    fs.cpSync(outDir, compatOutDir, { recursive: true, force: true })
+  }
   console.log('✨ Static export complete!')
 } finally {
   // 恢复 API 目录
