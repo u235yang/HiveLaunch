@@ -184,6 +184,17 @@ CD 开始前必须满足：
 - `rust-quality`
 - `desktop-smoke`（若路径命中时执行）
 
+## 13. `gh` 命令操作范围
+
+为避免误操作，GitHub CLI（`gh`）在本仓库内按以下边界执行：
+
+- 允许查询类操作：`gh pr view/list`、`gh run view/list`、`gh api` 只读查询。
+- 允许协作类操作：`gh pr create`、`gh pr edit`、`gh pr comment`、`gh pr checks`。
+- 允许合并类操作：仅对已完成审查结论的 PR 使用 `gh pr merge`，默认合并到 `main`，禁止绕过分支策略直接推送。
+- 禁止风险类操作：禁止删除仓库、修改可见性、覆盖标签、强制改写历史等高风险仓库级命令。
+- 受限场景说明：PR 作者不能用 `gh pr review --approve` 审批自己的 PR；如需合并，必须在 PR 记录中明确审查结论与风险说明。
+- 审计要求：所有 `gh` 写操作应在 PR 描述或评论中留下“变更目标、风险点、验证结果”。
+
 ---
 
 本文件是 HiveLaunch 仓库 CI/CD 执行规则基线。后续若新增移动端工程或 relay 服务发布链路，需同步更新本规则。
