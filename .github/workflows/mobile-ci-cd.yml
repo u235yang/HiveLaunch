@@ -83,7 +83,7 @@ jobs:
             echo "has_android=false" >> "$GITHUB_OUTPUT"
           fi
 
-          if [ -d "apps/mobile/src-tauri/gen/ios" ] || [ -d "apps/mobile/ios" ]; then
+          if [ -d "apps/mobile/src-tauri/gen/apple" ] || [ -d "apps/mobile/ios" ]; then
             echo "has_ios=true" >> "$GITHUB_OUTPUT"
           elif [ -f "apps/mobile/src-tauri/tauri.conf.json" ] && node -e "const p=require('./apps/mobile/package.json');process.exit((p.scripts&&p.scripts['ios:build'])?0:1)"; then
             echo "has_ios=true" >> "$GITHUB_OUTPUT"
@@ -187,7 +187,8 @@ jobs:
       - name: Build Android release
         run: |
           if [ "${{ needs.detect.outputs.tauri_mobile }}" = "true" ]; then
-            pnpm --dir apps/mobile android:build
+            pnpm --dir apps/mobile android:init
+            pnpm --dir apps/mobile exec tauri android build --debug --ci
           elif [ -f "apps/mobile/src-tauri/gen/android/gradlew" ]; then
             chmod +x apps/mobile/src-tauri/gen/android/gradlew
             (cd apps/mobile/src-tauri/gen/android && ./gradlew assembleRelease)
@@ -229,7 +230,8 @@ jobs:
       - name: Build iOS release
         run: |
           if [ "${{ needs.detect.outputs.tauri_mobile }}" = "true" ]; then
-            pnpm --dir apps/mobile ios:build
+            pnpm --dir apps/mobile ios:init
+            pnpm --dir apps/mobile exec tauri ios build --debug --target aarch64-sim --ci
           else
             set -euo pipefail
             cd apps/mobile/ios
@@ -250,7 +252,7 @@ jobs:
         with:
           name: mobile-ios-${{ needs.detect.outputs.release_tag || github.sha }}
           path: |
-            apps/mobile/src-tauri/gen/ios/**/build/**
+            apps/mobile/src-tauri/gen/apple/**/build/**
             apps/mobile/ios/build
 
   mobile-release-publish:
