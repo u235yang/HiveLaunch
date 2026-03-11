@@ -1,0 +1,6 @@
+packages:
+  - 'apps/*'
+  - 'relay/*'
+  - 'packages/*'
+  - 'features/*/api'
+  - 'infra/*'

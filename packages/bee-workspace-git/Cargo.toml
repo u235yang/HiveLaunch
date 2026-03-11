@@ -1,0 +1,26 @@
+[package]
+name = "bee-workspace-git"
+version = "0.1.0"
+edition = "2024"
+
+[features]
+default = []
+cloud = []
+
+[dependencies]
+bee-workspace-utils = { path = "../bee-workspace-utils" }
+chrono = { version = "0.4", features = ["serde"] }
+dirs = "5"
+git2 = { version = "0.20", default-features = false, features = [] }
+serde = { version = "1", features = ["derive"] }
+tempfile = "3"
+thiserror = "2"
+tracing = "0.1"
+ts-rs = { git = "https://github.com/xazukx/ts-rs.git", branch = "use-ts-enum", features = ["uuid-impl", "chrono-impl", "no-serde-warnings", "serde-json-impl"] }
+
+# For non-Android, use git2 with SSH support
+[target.'cfg(not(target_os = "android"))'.dependencies]
+# Already included above
+
+# For Android, we need to disable git features entirely to avoid OpenSSL
+# This is handled by default-features = false above

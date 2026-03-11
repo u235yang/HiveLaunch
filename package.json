@@ -1,0 +1,73 @@
+{
+  "name": "hivelaunch",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@9.0.0",
+  "scripts": {
+    "dev": "pnpm dev:desktop",
+    "dev:web": "pnpm --filter @hivelaunch/web dev",
+    "dev:relay-admin": "pnpm --filter @hivelaunch/relay-admin dev",
+    "dev:rust": "cd infra/tauri && cargo run --bin http-server",
+    "dev:desktop": "pnpm tauri dev --config infra/tauri/tauri.conf.json",
+    "build": "pnpm --filter @hivelaunch/web build",
+    "build:relay-admin": "pnpm --filter @hivelaunch/relay-admin build",
+    "build:tauri": "pnpm tauri build",
+    "tauri": "tauri",
+    "db:generate": "pnpm --filter @hivelaunch/db generate",
+    "db:migrate": "pnpm --filter @hivelaunch/db migrate",
+    "db:studio": "pnpm --filter @hivelaunch/db studio",
+    "db:seed": "pnpm --filter @hivelaunch/db seed",
+    "lint": "pnpm --filter @hivelaunch/web lint",
+    "lint:relay-admin": "pnpm --filter @hivelaunch/relay-admin lint",
+    "typecheck": "pnpm --filter @hivelaunch/web typecheck",
+    "typecheck:relay-admin": "pnpm --filter @hivelaunch/relay-admin typecheck"
+  },
+  "devDependencies": {
+    "@lexical/clipboard": "^0.40.0",
+    "@lexical/code": "^0.40.0",
+    "@lexical/link": "^0.40.0",
+    "@lexical/list": "^0.40.0",
+    "@lexical/markdown": "^0.40.0",
+    "@lexical/react": "^0.40.0",
+    "@lexical/rich-text": "^0.40.0",
+    "@lexical/selection": "^0.40.0",
+    "@lexical/table": "^0.40.0",
+    "@lexical/utils": "^0.40.0",
+    "@tauri-apps/api": "^2.10.1",
+    "@tauri-apps/cli": "^2.10.0",
+    "@types/node": "^20.0.0",
+    "concurrently": "^8.2.2",
+    "drizzle-orm": "^0.45.1",
+    "lexical": "^0.40.0",
+    "typescript": "^5.3.0"
+  },
+  "dependencies": {
+    "@assistant-ui/react": "^0.12.10",
+    "@assistant-ui/react-markdown": "^0.12.3",
+    "@hookform/resolvers": "^3.10.0",
+    "@tauri-apps/plugin-dialog": "^2.0.0",
+    "@tanstack/react-query": "^5.90.21",
+    "@phosphor-icons/react": "^2.1.10",
+    "@pierre/diffs": "^1.0.11",
+    "better-sqlite3": "^12.6.2",
+    "immer": "^11.1.4",
+    "jsonc-parser": "^3.3.1",
+    "lucide-react": "^0.563.0",
+    "react-diff-viewer-continued": "^4.1.2",
+    "react-hook-form": "^7.71.1",
+    "react-markdown": "^10.1.0",
+    "react-virtua": "^0.1.2",
+    "react-virtuoso": "^4.18.1",
+    "remark-gfm": "^4.0.1",
+    "rfc6902": "^5.1.2",
+    "zod": "^3.25.76",
+    "zustand": "^5.0.11"
+  },
+  "pnpm": {
+    "overrides": {
+      "drizzle-orm": "0.45.1",
+      "better-sqlite3": "12.6.2"
+    }
+  }
+}

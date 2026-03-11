@@ -1,0 +1,206 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Bee Platform Design System - Based on UI Mockup */
+
+:root {
+  --color-primary: #f59f0a;
+  --color-primary-50: #fffbeb;
+  --color-primary-100: #fef3c7;
+  --color-primary-200: #fde68a;
+  --color-primary-300: #fcd34d;
+  --color-primary-400: #fbbf24;
+  --color-primary-500: #f59e0b;
+  --color-primary-600: #d97706;
+  --color-primary-700: #b45309;
+  --color-primary-800: #92400e;
+  --color-primary-900: #78350f;
+  --color-primary-950: #451a03;
+
+  --color-background-light: #f8f7f5;
+  --color-background-dark: #1c1917;
+
+  --background: 36 20% 97%;
+  --foreground: 30 12% 10%;
+  --card: 0 0% 100%;
+  --card-foreground: 30 12% 10%;
+  --popover: 0 0% 100%;
+  --popover-foreground: 30 12% 10%;
+  --primary: 38 92% 50%;
+  --primary-foreground: 30 12% 10%;
+  --secondary: 35 22% 93%;
+  --secondary-foreground: 30 12% 10%;
+  --muted: 36 18% 92%;
+  --muted-foreground: 28 9% 38%;
+  --accent: 35 22% 93%;
+  --accent-foreground: 30 12% 10%;
+  --destructive: 0 72% 51%;
+  --destructive-foreground: 0 0% 98%;
+  --border: 30 11% 86%;
+  --input: 30 11% 86%;
+  --ring: 38 92% 50%;
+
+  --dvh: 100dvh;
+  --svh: 100svh;
+  --lvh: 100lvh;
+}
+
+.dark {
+  --background: 30 12% 10%;
+  --foreground: 35 22% 94%;
+  --card: 28 12% 14%;
+  --card-foreground: 35 22% 94%;
+  --popover: 28 12% 14%;
+  --popover-foreground: 35 22% 94%;
+  --primary: 38 92% 50%;
+  --primary-foreground: 30 12% 10%;
+  --secondary: 28 10% 20%;
+  --secondary-foreground: 35 22% 94%;
+  --muted: 28 10% 20%;
+  --muted-foreground: 34 12% 69%;
+  --accent: 28 10% 20%;
+  --accent-foreground: 35 22% 94%;
+  --destructive: 0 65% 55%;
+  --destructive-foreground: 0 0% 98%;
+  --border: 28 10% 26%;
+  --input: 28 10% 26%;
+  --ring: 38 92% 50%;
+}
+
+/* Fallback for browsers without dvh support */
+@supports not (height: 100dvh) {
+  :root {
+    --dvh: 100vh;
+  }
+}
+
+/* Base styles */
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html {
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  height: 100%;
+}
+
+body {
+  font-family: 'Inter', 'Noto Sans SC', -apple-system, BlinkMacSystemFont, sans-serif;
+  font-feature-settings: 'cv11', 'ss01';
+  margin: 0;
+  min-height: 100%;
+  min-height: 100vh;
+  min-height: 100dvh; /* 现代浏览器优先使用 dvh */
+  background-color: hsl(var(--background));
+  color: hsl(var(--foreground));
+}
+
+/* Custom scrollbar - matching design mockup */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #e2e8f0;
+  border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #cbd5e1;
+}
+
+.dark ::-webkit-scrollbar-thumb {
+  background: #3f3f46;
+}
+
+.dark ::-webkit-scrollbar-thumb:hover {
+  background: #52525b;
+}
+
+/* Focus visible styles - Primary color */
+*:focus-visible {
+  outline: 2px solid var(--color-primary);
+  outline-offset: 2px;
+}
+
+/* Animations */
+@keyframes fade-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes slide-in-from-top {
+  from {
+    transform: translateY(-10px);
+    opacity: 0;
+  }
+  to {
+    transform: translateY(0);
+    opacity: 1;
+  }
+}
+
+@keyframes slide-in-from-bottom {
+  from {
+    transform: translateY(10px);
+    opacity: 0;
+  }
+  to {
+    transform: translateY(0);
+    opacity: 1;
+  }
+}
+
+.animate-fade-in {
+  animation: fade-in 0.2s ease-out;
+}
+
+.animate-slide-in-top {
+  animation: slide-in-from-top 0.2s ease-out;
+}
+
+.animate-slide-in-bottom {
+  animation: slide-in-from-bottom 0.2s ease-out;
+}
+
+/* Utility: Line clamp for descriptions */
+.line-clamp-2 {
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+/* 移动端水平滚动优化 - 隐藏滚动条但保持可滚动 */
+.no-scrollbar {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}
+.no-scrollbar::-webkit-scrollbar {
+  display: none;
+}
+
+/* 移动端安全区域 - 刘海屏适配 */
+@supports (padding: env(safe-area-inset-left)) {
+  .safe-area-x {
+    padding-left: max(1rem, env(safe-area-inset-left));
+    padding-right: max(1rem, env(safe-area-inset-right));
+  }
+  .safe-area-y {
+    padding-top: max(1rem, env(safe-area-inset-top));
+    padding-bottom: max(1rem, env(safe-area-inset-bottom));
+  }
+}

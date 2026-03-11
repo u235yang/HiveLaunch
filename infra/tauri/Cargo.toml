@@ -1,0 +1,61 @@
+[package]
+name = "hivelaunch"
+version = "0.1.0"
+edition = "2021"
+default-run = "hivelaunch"
+
+[lib]
+name = "hivelaunch"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[dependencies]
+tauri = { version = "2.0", features = ["unstable"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+json-patch = "2"
+tokio = { version = "1", features = ["full", "process", "io-util", "time", "sync"] }
+tauri-plugin-shell = "2.3.5"
+tauri-plugin-dialog = "2"
+log = "0.4"
+env_logger = "0.11"
+uuid = { version = "1.0", features = ["v4"] }
+chrono = { version = "0.4", features = ["serde"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }
+futures-util = "0.3"
+async-trait = "0.1"
+thiserror = "1.0"
+tokio-stream = "0.1"
+which = "6.0"
+dirs = "5.0"
+lazy_static = "1.4"
+base64 = "0.22"
+sha2 = "0.10"
+urlencoding = "2.1"
+
+bee-executor = { path = "../../packages/bee-executor" }
+bee-workspace-utils = { path = "../../packages/bee-workspace-utils" }
+bee-container = { path = "../../packages/bee-container" }
+
+# HTTP Server (for agent execution API)
+axum = { version = "0.7", features = ["macros", "ws"] }
+tower = { version = "0.4", features = ["util"] }
+tower-http = { version = "0.5", features = ["cors"] }
+
+# WebSocket
+tokio-tungstenite = "0.21"
+
+# Database (SQLite with sqlx)
+sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite"] }
+tracing = "0.1"
+
+[build-dependencies]
+tauri-build = { version = "2.0", features = [] }
+
+[[bin]]
+name = "http-server"
+path = "src/http_server_main.rs"
+
+# Patches for codex-core's forked tokio-tungstenite with proxy support
+[patch.crates-io]
+tokio-tungstenite = { git = "https://github.com/openai-oss-forks/tokio-tungstenite", rev = "132f5b39c862e3a970f731d709608b3e6276d5f6" }
+tungstenite = { git = "https://github.com/openai-oss-forks/tungstenite-rs", rev = "9200079d3b54a1ff51072e24d81fd354f085156f" }

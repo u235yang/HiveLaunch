@@ -1,0 +1,69 @@
+{
+  "extends": "../../tsconfig.json",
+  "compilerOptions": {
+    "jsx": "preserve",
+    "plugins": [
+      {
+        "name": "next"
+      }
+    ],
+    "moduleResolution": "bundler",
+    "skipLibCheck": true,
+    "target": "ES2018",
+    "lib": [
+      "dom",
+      "dom.iterable",
+      "esnext"
+    ],
+    "allowJs": true,
+    "strict": false,
+    "noEmit": true,
+    "incremental": true,
+    "module": "esnext",
+    "esModuleInterop": true,
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    "typeRoots": [
+      "./node_modules/@types",
+      "../../node_modules/@types"
+    ],
+    "baseUrl": ".",
+    "paths": {
+      "@/*": [
+        "./app/*",
+        "./*"
+      ],
+      "@/features/*": [
+        "../../features/*"
+      ],
+      "@/lib/*": [
+        "./lib/*"
+      ],
+      "@shared/types": [
+        "../../packages/shared-types/src"
+      ],
+      "@shared/ui": [
+        "../../packages/shared-ui/src"
+      ],
+      "@hivelaunch/shared-types": [
+        "../../packages/shared-types/src"
+      ],
+      "@hivelaunch/shared-ui": [
+        "../../packages/shared-ui/src"
+      ]
+    }
+  },
+  "include": [
+    "**/*.ts",
+    "**/*.tsx",
+    ".next/types/**/*.ts",
+    "next-env.d.ts",
+    "out/types/**/*.ts"
+  ],
+  "exclude": [
+    "node_modules",
+    "../../features/**/db/**",
+    "../../features/**/api/**",
+    "../../features/**/hooks/**"
+  ]
+}

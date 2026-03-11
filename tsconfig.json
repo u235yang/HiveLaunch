@@ -1,0 +1,24 @@
+{
+  "files": [],
+  "references": [
+    { "path": "./apps/web" },
+    { "path": "./relay/relay-admin" },
+    { "path": "./packages/shared-types" },
+    { "path": "./packages/shared-ui" },
+    { "path": "./infra/db" },
+    { "path": "./infra/tauri" }
+  ],
+  "compilerOptions": {
+    "baseUrl": "./",
+    "moduleResolution": "bundler",
+    "paths": {
+      "@/*": ["./apps/web/*"],
+      "@/features/*": ["./features/*"],
+      "@/features": ["./features"],
+      "@/infra/*": ["./infra/*"],
+      "@/infra/db": ["./infra/db"],
+      "@shared/types": ["./packages/shared-types/src"],
+      "@shared/ui": ["./packages/shared-ui/src"]
+    }
+  }
+}

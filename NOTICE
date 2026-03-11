@@ -1,0 +1,31 @@
+Bee Platform - 第三方组件声明
+================================
+
+本项目包含或衍生自以下第三方开源软件：
+
+--------------------------------------------------------------------------------
+
+1. vibe-kanban
+   来源: https://github.com/upware-ai/vibe-kanban
+   许可证: Apache License 2.0
+
+   本项目的 packages/bee-executor/ 组件基于 vibe-kanban 的
+   crates/executors/ 模块开发，遵循 Apache License 2.0 许可证。
+
+   Apache License 2.0 要求：
+   - 保留原始许可证和版权声明
+   - 说明对原始文件的修改
+   - 衍生作品需包含原始许可证副本
+
+   原始许可证全文见: packages/bee-executor/LICENSE
+
+   主要修改内容：
+   - 重命名依赖前缀 (workspace_utils → bee_workspace_utils)
+   - 移除 Codex executor，替换为 LogWriter stub
+   - 添加 tracing 调试日志
+   - 为多个 struct 添加 Default derive
+   - 其他适配 Bee Platform 的修改
+
+--------------------------------------------------------------------------------
+
+如需了解完整的第三方依赖列表，请参阅各包的 package.json 或 Cargo.toml 文件。
