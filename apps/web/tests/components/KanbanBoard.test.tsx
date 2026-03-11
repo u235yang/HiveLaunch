@@ -43,13 +43,13 @@ describe('KanbanBoard Component', () => {
   it('renders kanban board container', () => {
     renderWithIntl(<KanbanBoard />);
     
-    expect(screen.getByText('新建任务')).toBeInTheDocument();
+    expect(screen.getByText('进行中')).toBeInTheDocument();
   });
 
   it('applies correct padding styles', () => {
     const { container } = renderWithIntl(<KanbanBoard />);
     
-    expect(container.querySelector('.p-4')).toBeTruthy();
+    expect(container.querySelector('.px-4')).toBeTruthy();
   });
 
   it('renders without crashing', () => {

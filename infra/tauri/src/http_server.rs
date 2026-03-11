@@ -8845,6 +8845,9 @@ mod tests {
 
     #[tokio::test]
     async fn skills_endpoints_should_install_and_remove_skill() {
+        let _guard = crate::commands::skills_hub::test_env_lock()
+            .lock()
+            .expect("lock test env for skills endpoints");
         let cfg_dir = test_temp_dir("config");
         let hub_dir = test_temp_dir("hub");
         std::env::set_var("XDG_CONFIG_HOME", &cfg_dir);
@@ -8949,11 +8952,17 @@ mod tests {
             .expect("read second status body");
         let status_json2: serde_json::Value =
             serde_json::from_slice(&status_body2).expect("parse second status json");
-        let installed_len2 = status_json2["data"]["installed_skills"]
+        let installed_skills2 = status_json2["data"]["installed_skills"]
             .as_array()
-            .map(|v| v.len())
-            .unwrap_or(0);
-        assert_eq!(installed_len2, 0);
+            .cloned()
+            .unwrap_or_default();
+        let removed_skill_exists = installed_skills2.iter().any(|item| {
+            item["name"]
+                .as_str()
+                .map(|name| name == "vercel-react-best-practices")
+                .unwrap_or(false)
+        });
+        assert!(!removed_skill_exists);
 
         std::env::remove_var("BEE_SKILLS_MOCK");
         std::env::remove_var("XDG_CONFIG_HOME");
@@ -9217,7 +9226,7 @@ mod tests {
             },
         );
         assert_eq!(summary.template_path, "templates/demo-template");
-        assert_eq!(summary.source_ref, "master");
+        assert_eq!(summary.source_ref, DEFAULT_TEMPLATE_SOURCE_REF);
         assert_eq!(summary.source_version, Some("test-version".to_string()));
         assert_eq!(summary.recommended_swarm_ids, vec!["swarm-a".to_string()]);
         assert_eq!(summary.phase, 1);

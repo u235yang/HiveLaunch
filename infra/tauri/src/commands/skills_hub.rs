@@ -249,6 +249,12 @@ pub fn skills_update(hub_dir: &Path) -> Result<SkillsCommandResult, String> {
     run_skills_command(hub_dir, &[String::from("update")])
 }
 
+#[cfg(test)]
+pub fn test_env_lock() -> &'static std::sync::Mutex<()> {
+    static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+    LOCK.get_or_init(|| std::sync::Mutex::new(()))
+}
+
 const SKILLS_SEARCH_API: &str = "https://skills.sh/api/search";
 const DEFAULT_SEARCH_LIMIT: u32 = 20;
 
@@ -402,8 +408,13 @@ mod tests {
         let ts = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("system time before unix epoch")
-            .as_millis();
-        std::env::temp_dir().join(format!("hivelaunch-skills-{}-{}", name, ts))
+            .as_micros();
+        std::env::temp_dir().join(format!(
+            "hivelaunch-skills-{}-{}-{}",
+            name,
+            ts,
+            uuid::Uuid::new_v4()
+        ))
     }
 
     #[test]
@@ -424,6 +435,9 @@ mod tests {
 
     #[test]
     fn mock_install_and_remove_work() {
+        let _guard = test_env_lock()
+            .lock()
+            .expect("lock test env for mock install/remove");
         let hub = tmp_dir("mock");
         std::env::set_var("BEE_SKILLS_MOCK", "1");
         let install = skills_install(
@@ -449,6 +463,9 @@ mod tests {
 
     #[tokio::test]
     async fn skills_search_api_mock_returns_more_than_six_results() {
+        let _guard = test_env_lock()
+            .lock()
+            .expect("lock test env for mock search");
         std::env::set_var("BEE_SKILLS_MOCK", "1");
         let result = skills_search_api("react", Some(20))
             .await

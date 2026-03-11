@@ -19,17 +19,23 @@
 
 ## 3. 分支与版本策略
 
-- `main`：稳定主干，仅接收通过审查且 CI 全绿的 PR。
-- `feature/*`：功能分支，开发与自测使用。
-- `hotfix/*`：紧急修复分支，流程与功能分支一致，但优先级更高。
+- `main`：生产稳定分支，仅接收来自 `dev` 的发布型 PR。
+- `dev`：团队集成主线，所有功能在该分支完成集成验证。
+- `feature/*`：功能分支，建议通过 git worktree 从 `dev` 拉出开发。
+- `hotfix/*`：紧急修复分支，建议从 `main` 拉出，修复后回灌 `dev`。
 - 版本标签使用语义化版本：`vMAJOR.MINOR.PATCH`（示例：`v0.5.2`）。
+
+推荐流转路径：
+
+- 日常功能：`dev -> worktree(feature/*) -> PR 到 dev -> dev PR 到 main`
+- 紧急修复：`main -> worktree(hotfix/*) -> PR 到 main -> 回灌 PR 到 dev`
 
 ## 4. CI 触发规则
 
 满足以下任一条件触发 CI：
 
-- `pull_request` 指向 `main`
-- `push` 到 `main`
+- `pull_request` 指向 `dev` 或 `main`
+- `push` 到 `dev` 或 `main`
 - `workflow_dispatch` 手动触发
 
 建议采用路径过滤，减少无效构建：
@@ -41,6 +47,16 @@
 ## 5. CI 必过门禁
 
 PR 合并前至少满足以下检查全部通过：
+
+### 5.0 提交状态判定（必须全部满足）
+
+一次代码变更只有在以下条件全部满足时，才视为“符合提交状态”：
+
+- 代码评审通过：至少 1 名 reviewer 批准（Owner 文件可加严）。
+- CI 门禁全绿：本文件第 5.1~5.4 的硬性检查全部通过。
+- 分支最新：分支与 `main` 同步后仍能通过同样门禁，禁止“旧基线绿灯”。
+- 变更可追溯：PR 描述必须包含“变更目标、风险点、验证结果”三段信息。
+- 无阻断级问题：不存在 P0/P1 缺陷、构建中断、核心路径不可用。
 
 ### 5.1 Web 门禁
 
@@ -60,6 +76,18 @@ PR 合并前至少满足以下检查全部通过：
 - `pnpm tauri build --debug` 或等价校验命令（按 CI 资源评估）
 - 若签名材料缺失，至少完成无签名构建验证
 
+### 5.4 规则红线门禁（代码规范阻断）
+
+以下命中任一条，PR 必须阻断：
+
+- TypeScript 出现 `as any` 或 `@ts-ignore`
+- 业务代码出现 `console.log`
+- Rust 业务代码出现 `unwrap()`
+- 新增 UI 可见文案未国际化（未接入 `next-intl` 或既定词典）
+- 新增业务组件使用硬编码颜色（如 `#hex`、`bg-white`、`text-black`、`border-gray-*`）
+
+说明：5.4 建议通过静态扫描在 CI 中自动阻断，避免依赖人工 review 兜底。
+
 ## 6. CD 触发规则
 
 满足以下条件之一触发 CD：
@@ -77,6 +105,7 @@ CD 开始前必须满足：
 - 版本号与标签格式合法
 - 目标环境审批通过（GitHub Environment Protection）
 - 发布说明（Release Notes）已准备完成
+- 变更回滚路径清晰（上一个稳定标签可一键回退）
 
 ## 8. 环境与权限策略
 
@@ -113,9 +142,33 @@ CD 开始前必须满足：
 
 建议至少维护以下三个工作流文件：
 
-- `ci.yml`：PR 与 main 的质量门禁
+- `ci.yml`：PR 到 `dev/main` 与 `push dev/main` 的质量门禁
 - `release.yml`：标签发布流程
 - `manual-deploy.yml`：手动部署到 staging / production
+
+## 12. 分支保护建议（GitHub Settings 必配）
+
+`dev` 与 `main` 分支都建议开启保护项，确保“提交状态”被平台强约束：
+
+- Require a pull request before merging（禁止直推）
+- Require approvals（至少 1 人）
+- Require status checks to pass before merging（勾选全部 CI 检查）
+- Require branches to be up to date before merging
+- Require conversation resolution before merging
+- Include administrators（管理员同样受限）
+
+分支保护建议差异：
+
+- `dev`：允许接收 `feature/*` 与 `hotfix` 回灌 PR，要求 CI 全绿即可合并。
+- `main`：仅允许接收来自 `dev` 的 PR，并保留环境审批与发布门禁。
+
+建议将以下检查名设为 Required：
+
+- `policy-guard`
+- `changes`
+- `web-quality`
+- `rust-quality`
+- `desktop-smoke`（若路径命中时执行）
 
 ---
 
