@@ -189,7 +189,8 @@ jobs:
           if [ "${{ needs.detect.outputs.tauri_mobile }}" = "true" ]; then
             (
               cd apps/mobile
-              pnpm android:init
+              rm -rf src-tauri/gen/android
+              pnpm exec tauri android init
               pnpm exec tauri android build --debug --ci
             )
           elif [ -f "apps/mobile/src-tauri/gen/android/gradlew" ]; then
@@ -235,7 +236,8 @@ jobs:
           if [ "${{ needs.detect.outputs.tauri_mobile }}" = "true" ]; then
             (
               cd apps/mobile
-              pnpm ios:init
+              rm -rf src-tauri/gen/apple
+              pnpm exec tauri ios init
               pnpm exec tauri ios build --debug --target aarch64-sim --ci
             )
           else
