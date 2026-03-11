@@ -7,7 +7,7 @@
 - Web（Next.js）
 - API（Rust HTTP Server，端口 3847）
 - Desktop（Tauri）
-- Mobile（Android / iOS，当前仓库未落地工程目录，暂不纳入第一阶段自动发布）
+- Mobile（Android / iOS，已预置独立移动端工作流）
 
 ## 2. 基础原则
 
@@ -134,10 +134,12 @@ CD 开始前必须满足：
 
 ### 9.2 Mobile（Android / iOS）
 
-当前仓库未包含 `apps/mobile`、`android`、`ios` 工程目录，因此暂不进入第一阶段自动发布。移动端接入后按以下原则补齐：
+移动端已通过 `mobile-ci-cd.yml` 预置 CI/CD。未接入 `apps/mobile` 时工作流自动跳过；接入后自动启用质量门禁与发布链路：
 
-- Android：构建 APK/AAB，签名材料走 Secrets
-- iOS：使用 macOS Runner，证书与描述文件走 Encrypted Secrets
+- CI：支持 React Native/Expo（Node）与 Flutter 两类质量检查
+- CD：支持 Android Release 构建与 iOS Release 构建，并上传 Release 资产
+- 触发：`dev/main` 的 PR/Push 做质量校验，`v*` 标签或手动触发执行移动端发布
+- 产物：Android APK 与 iOS build 目录按 tag 打包归档
 - 与 Web/Desktop 共享版本号策略与发布说明
 
 ## 10. 失败处理与回滚
@@ -154,11 +156,12 @@ CD 开始前必须满足：
 
 ## 11. 最小工作流建议
 
-建议至少维护以下三个工作流文件：
+建议至少维护以下四个工作流文件：
 
 - `ci.yml`：PR 到 `dev/main` 与 `push dev/main` 的质量门禁
 - `release.yml`：标签发布流程
 - `manual-deploy.yml`：手动部署到 staging / production
+- `mobile-ci-cd.yml`：移动端质量校验与标签发布流程
 
 ## 12. 分支保护建议（GitHub Settings 必配）
 
