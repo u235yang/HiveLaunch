@@ -246,7 +246,7 @@ HiveLaunch/
 | 状态管理 | [Zustand](https://zustand-demo.pmnd.rs/) + [TanStack Query](https://tanstack.com/query) |
 | 表单验证 | [React Hook Form](https://react-hook-form.com/) + [Zod](https://zod.dev/) |
 | 后端服务 | Rust + [Axum](https://github.com/tokio-rs/axum) |
-| 数据库 | SQLite + [Drizzle ORM](https://orm.drizzle.team/) |
+| 数据库 | SQLite + [sqlx](https://github.com/launchbadge/sqlx) |
 | UI 组件 | [Tailwind CSS](https://tailwindcss.com/) + [shadcn/ui](https://ui.shadcn.com/) |
 | AI 执行器 | OpenCode / Claude / Cursor / Gemini 等 |
 

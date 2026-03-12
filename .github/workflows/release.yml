@@ -23,14 +23,27 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       tag: ${{ steps.vars.outputs.tag }}
+      prerelease: ${{ steps.vars.outputs.prerelease }}
+      release_name: ${{ steps.vars.outputs.release_name }}
     steps:
       - id: vars
         run: |
+          set -euo pipefail
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            echo "tag=${{ inputs.release_tag }}" >> "$GITHUB_OUTPUT"
+            tag="${{ inputs.release_tag }}"
           else
-            echo "tag=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+            tag="${GITHUB_REF_NAME}"
           fi
+          if [[ "$tag" == *beta* ]]; then
+            prerelease=true
+            release_name="HiveLaunch Beta ${tag}"
+          else
+            prerelease=false
+            release_name="HiveLaunch ${tag}"
+          fi
+          echo "tag=${tag}" >> "$GITHUB_OUTPUT"
+          echo "prerelease=${prerelease}" >> "$GITHUB_OUTPUT"
+          echo "release_name=${release_name}" >> "$GITHUB_OUTPUT"
 
   build-web:
     needs: prepare
@@ -46,11 +59,12 @@ jobs:
           node-version: 20
           cache: pnpm
       - run: pnpm install --frozen-lockfile
-      - run: pnpm --filter @hivelaunch/web build
+      - run: pnpm --filter @hivelaunch/web exec node scripts/static-export-build.cjs
       - uses: actions/upload-artifact@v4
         with:
-          name: web-${{ needs.prepare.outputs.tag }}
-          path: apps/web/.next
+          name: web-static-${{ needs.prepare.outputs.tag }}
+          path: apps/web/out
+          if-no-files-found: error
 
   build-api:
     needs: prepare
@@ -70,26 +84,39 @@ jobs:
           sudo apt-get install -y pkg-config libglib2.0-dev libgtk-3-dev libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev patchelf
       - run: cargo build --release --manifest-path infra/tauri/Cargo.toml --bin http-server
       - name: Prepare non-Windows API artifact
-        if: runner.os != 'Windows'
+        if: runner.os == 'Linux'
         run: |
           mkdir -p infra/tauri/target/release/dist
-          cp infra/tauri/target/release/http-server infra/tauri/target/release/dist/http-server-${{ matrix.os }}
+          cp infra/tauri/target/release/http-server infra/tauri/target/release/dist/hivelaunch-api-linux
+      - name: Prepare macOS API artifact
+        if: runner.os == 'macOS'
+        run: |
+          mkdir -p infra/tauri/target/release/dist
+          cp infra/tauri/target/release/http-server infra/tauri/target/release/dist/hivelaunch-api-macos
       - name: Prepare Windows API artifact
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path infra/tauri/target/release/dist | Out-Null
-          Copy-Item infra/tauri/target/release/http-server.exe infra/tauri/target/release/dist/http-server-${{ matrix.os }}.exe
+          Copy-Item infra/tauri/target/release/http-server.exe infra/tauri/target/release/dist/hivelaunch-api-windows.exe
       - uses: actions/upload-artifact@v4
-        if: runner.os != 'Windows'
+        if: runner.os == 'Linux'
         with:
-          name: http-server-${{ matrix.os }}-${{ needs.prepare.outputs.tag }}
-          path: infra/tauri/target/release/dist/http-server-${{ matrix.os }}
+          name: api-linux-${{ needs.prepare.outputs.tag }}
+          path: infra/tauri/target/release/dist/hivelaunch-api-linux
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        if: runner.os == 'macOS'
+        with:
+          name: api-macos-${{ needs.prepare.outputs.tag }}
+          path: infra/tauri/target/release/dist/hivelaunch-api-macos
+          if-no-files-found: error
       - uses: actions/upload-artifact@v4
         if: runner.os == 'Windows'
         with:
-          name: http-server-${{ matrix.os }}-${{ needs.prepare.outputs.tag }}
-          path: infra/tauri/target/release/dist/http-server-${{ matrix.os }}.exe
+          name: api-windows-${{ needs.prepare.outputs.tag }}
+          path: infra/tauri/target/release/dist/hivelaunch-api-windows.exe
+          if-no-files-found: error
 
   build-desktop:
     needs: prepare
@@ -115,18 +142,13 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y pkg-config libglib2.0-dev libgtk-3-dev libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev patchelf
       - run: pnpm install --frozen-lockfile
-      - run: pnpm tauri build --config infra/tauri/tauri.conf.json
+      - run: pnpm tauri build --config infra/tauri/tauri.conf.json --bundles all
       - uses: actions/upload-artifact@v4
         with:
           name: desktop-${{ matrix.os }}-${{ needs.prepare.outputs.tag }}
           path: |
             infra/tauri/target/release/bundle
-            infra/tauri/target/release/*.dmg
-            infra/tauri/target/release/*.app
-            infra/tauri/target/release/*.msi
-            infra/tauri/target/release/*.exe
-            infra/tauri/target/release/*.deb
-            infra/tauri/target/release/*.AppImage
+          if-no-files-found: error
 
   build-mobile-android:
     needs: prepare
@@ -163,6 +185,7 @@ jobs:
             apps/mobile/src-tauri/gen/android/**/build/outputs/**/*.aab
             apps/mobile/android/**/build/outputs/**/*.apk
             apps/mobile/android/**/build/outputs/**/*.aab
+          if-no-files-found: error
 
   build-mobile-ios:
     needs: prepare
@@ -192,6 +215,7 @@ jobs:
           path: |
             apps/mobile/src-tauri/gen/apple/**/build/**
             apps/mobile/ios/build
+          if-no-files-found: error
 
   publish-release:
     needs: [prepare, build-web, build-api, build-desktop, build-mobile-android, build-mobile-ios]
@@ -200,16 +224,72 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           path: artifacts
-      - name: Package release assets
+      - name: Prepare release assets
         run: |
+          set -euo pipefail
+          TAG="${{ needs.prepare.outputs.tag }}"
           mkdir -p release-assets
-          for artifact_dir in artifacts/*; do
-            artifact_name="$(basename "$artifact_dir")"
-            tar -czf "release-assets/${artifact_name}.tar.gz" -C "$artifact_dir" .
-          done
+
+          cp "artifacts/api-linux-${TAG}/hivelaunch-api-linux" "release-assets/hivelaunch-api-linux-${TAG}"
+          cp "artifacts/api-macos-${TAG}/hivelaunch-api-macos" "release-assets/hivelaunch-api-macos-${TAG}"
+          cp "artifacts/api-windows-${TAG}/hivelaunch-api-windows.exe" "release-assets/hivelaunch-api-windows-${TAG}.exe"
+
+          WEB_ENTRY="$(find "artifacts/web-static-${TAG}" -type f -name 'index.html' | head -n 1)"
+          test -n "${WEB_ENTRY}"
+          cp "${WEB_ENTRY}" "release-assets/hivelaunch-web-${TAG}.html"
+
+          LINUX_DESKTOP="$(find "artifacts/desktop-ubuntu-latest-${TAG}" -type f \( -name '*.AppImage' -o -name '*.deb' \) | sort | head -n 1)"
+          MACOS_DESKTOP="$(find "artifacts/desktop-macos-latest-${TAG}" -type f \( -name '*.dmg' -o -name '*.app.tar.gz' \) | sort | head -n 1)"
+          WINDOWS_DESKTOP="$(find "artifacts/desktop-windows-latest-${TAG}" -type f \( -name '*.exe' -o -name '*.msi' \) | sort | head -n 1)"
+          ANDROID_MOBILE="$(find "artifacts/mobile-android-${TAG}" -type f \( -name '*.apk' -o -name '*.aab' \) | sort | head -n 1)"
+          IOS_MOBILE_IPA="$(find "artifacts/mobile-ios-${TAG}" -type f -name '*.ipa' | sort | head -n 1)"
+          IOS_MOBILE_XCARCHIVE="$(find "artifacts/mobile-ios-${TAG}" -type d -name '*.xcarchive' | sort | head -n 1)"
+
+          test -n "${LINUX_DESKTOP}"
+          test -n "${MACOS_DESKTOP}"
+          test -n "${WINDOWS_DESKTOP}"
+          test -n "${ANDROID_MOBILE}"
+          if [[ -z "${IOS_MOBILE_IPA}" && -z "${IOS_MOBILE_XCARCHIVE}" ]]; then
+            echo "No iOS IPA or XCARCHIVE artifact found"
+            exit 1
+          fi
+
+          if [[ "${LINUX_DESKTOP}" == *.deb ]]; then
+            cp "${LINUX_DESKTOP}" "release-assets/hivelaunch-desktop-linux-${TAG}.deb"
+          else
+            cp "${LINUX_DESKTOP}" "release-assets/hivelaunch-desktop-linux-${TAG}.AppImage"
+          fi
+
+          if [[ "${MACOS_DESKTOP}" == *.dmg ]]; then
+            cp "${MACOS_DESKTOP}" "release-assets/hivelaunch-desktop-macos-${TAG}.dmg"
+          else
+            cp "${MACOS_DESKTOP}" "release-assets/hivelaunch-desktop-macos-${TAG}.app.tar.gz"
+          fi
+
+          if [[ "${WINDOWS_DESKTOP}" == *.msi ]]; then
+            cp "${WINDOWS_DESKTOP}" "release-assets/hivelaunch-desktop-windows-${TAG}.msi"
+          else
+            cp "${WINDOWS_DESKTOP}" "release-assets/hivelaunch-desktop-windows-${TAG}.exe"
+          fi
+
+          if [[ "${ANDROID_MOBILE}" == *.aab ]]; then
+            cp "${ANDROID_MOBILE}" "release-assets/hivelaunch-mobile-android-${TAG}.aab"
+          else
+            cp "${ANDROID_MOBILE}" "release-assets/hivelaunch-mobile-android-${TAG}.apk"
+          fi
+
+          if [[ -n "${IOS_MOBILE_IPA}" ]]; then
+            cp "${IOS_MOBILE_IPA}" "release-assets/hivelaunch-mobile-ios-${TAG}.ipa"
+          else
+            ditto -c -k --sequesterRsrc --keepParent "${IOS_MOBILE_XCARCHIVE}" "release-assets/hivelaunch-mobile-ios-dev-unsigned-${TAG}.xcarchive.zip"
+          fi
+
+          ls -la release-assets
       - uses: softprops/action-gh-release@v2
         with:
+          name: ${{ needs.prepare.outputs.release_name }}
           tag_name: ${{ needs.prepare.outputs.tag }}
+          prerelease: ${{ needs.prepare.outputs.prerelease }}
           fail_on_unmatched_files: true
           files: |
             release-assets/*
