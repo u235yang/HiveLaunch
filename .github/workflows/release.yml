@@ -146,18 +146,18 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           cd infra/tauri
-          pnpm tauri build --config tauri.conf.json --bundles deb
+          pnpm exec tauri build --config tauri.conf.json --bundles deb
       - name: Build desktop bundle for macOS
         if: runner.os == 'macOS'
         run: |
           cd infra/tauri
-          pnpm tauri build --config tauri.conf.json --bundles dmg,app
+          pnpm exec tauri build --config tauri.conf.json --bundles dmg,app
       - name: Build desktop bundle for Windows
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
           Set-Location infra/tauri
-          pnpm tauri build --config tauri.conf.json --bundles msi,nsis
+          pnpm exec tauri build --config tauri.conf.json --bundles msi,nsis
       - uses: actions/upload-artifact@v4
         with:
           name: desktop-${{ matrix.os }}-${{ needs.prepare.outputs.tag }}
