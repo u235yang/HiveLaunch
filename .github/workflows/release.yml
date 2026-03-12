@@ -146,7 +146,7 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           cd infra/tauri
-          pnpm tauri build --config tauri.conf.json --bundles deb,appimage
+          pnpm tauri build --config tauri.conf.json --bundles deb
       - name: Build desktop bundle for macOS
         if: runner.os == 'macOS'
         run: |
