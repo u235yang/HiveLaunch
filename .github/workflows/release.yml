@@ -296,7 +296,8 @@ jobs:
           else
             XCARCHIVE_DIR="$(dirname "${IOS_MOBILE_XCARCHIVE}")"
             XCARCHIVE_NAME="$(basename "${IOS_MOBILE_XCARCHIVE}")"
-            (cd "${XCARCHIVE_DIR}" && zip -r "../../release-assets/hivelaunch-mobile-ios-dev-unsigned-${TAG}.xcarchive.zip" "${XCARCHIVE_NAME}")
+            OUTPUT_ZIP="${GITHUB_WORKSPACE}/release-assets/hivelaunch-mobile-ios-dev-unsigned-${TAG}.xcarchive.zip"
+            (cd "${XCARCHIVE_DIR}" && zip -r "${OUTPUT_ZIP}" "${XCARCHIVE_NAME}")
           fi
 
           ls -la release-assets
