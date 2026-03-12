@@ -138,8 +138,11 @@ export function KanbanBoard({ projectId }: KanbanBoardProps) {
   const createTask = useTaskStore((state) => state.createTask)
   const moveTask = useTaskStore((state) => state.moveTask)
   const updateTask = useTaskStore((state) => state.updateTask)
+  const discoveryAgent = activeProjectId
+    ? normalizeTaskAgentCli(projectSwarm?.swarm.cli)
+    : null
   const discovery = useExecutorDiscovery(
-    normalizeTaskAgentCli(projectSwarm?.swarm.cli),
+    discoveryAgent,
     {
       workspaceId: undefined,
       repoId: activeProjectId,
@@ -552,7 +555,9 @@ export function KanbanBoard({ projectId }: KanbanBoardProps) {
 
     // 延迟执行，确保 taskExecution hook 已经更新
     const timer = setTimeout(() => {
-      void handleStartExecutionRef.current()
+      void handleStartExecutionRef.current().catch((error) => {
+        console.error('[KanbanBoard] Auto start execution failed:', error)
+      })
     }, 100)
 
     return () => clearTimeout(timer)

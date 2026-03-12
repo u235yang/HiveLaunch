@@ -170,6 +170,32 @@ pub async fn init_db_pool(database_url: &str) -> Result<SqlitePool, sqlx::Error>
     .execute(&pool)
     .await?;
 
+    sqlx::query(
+        r#"CREATE TABLE IF NOT EXISTS execution_processes (
+            id TEXT PRIMARY KEY NOT NULL,
+            session_id TEXT NOT NULL,
+            workspace_id TEXT NOT NULL,
+            run_reason TEXT NOT NULL,
+            executor_action TEXT,
+            status TEXT NOT NULL,
+            exit_code INTEGER,
+            dropped INTEGER DEFAULT 0 NOT NULL,
+            started_at INTEGER NOT NULL,
+            completed_at INTEGER,
+            created_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL
+        )"#,
+    )
+    .execute(&pool)
+    .await?;
+
+    sqlx::query(
+        r#"CREATE INDEX IF NOT EXISTS idx_execution_processes_session_id
+           ON execution_processes(session_id)"#,
+    )
+    .execute(&pool)
+    .await?;
+
     // ========== Create tables for swarm and project management ==========
 
     // projects table
@@ -188,6 +214,86 @@ pub async fn init_db_pool(database_url: &str) -> Result<SqlitePool, sqlx::Error>
             created_at INTEGER DEFAULT (strftime('%s', 'now')) NOT NULL,
             updated_at INTEGER DEFAULT (strftime('%s', 'now')) NOT NULL
         )"#,
+    )
+    .execute(&pool)
+    .await?;
+
+    sqlx::query(
+        r#"CREATE TABLE IF NOT EXISTS tasks (
+            id TEXT PRIMARY KEY NOT NULL,
+            project_id TEXT NOT NULL,
+            title TEXT,
+            description TEXT NOT NULL,
+            status TEXT DEFAULT 'todo' NOT NULL,
+            agent_cli TEXT DEFAULT 'OPENCODE' NOT NULL,
+            model_id TEXT,
+            task_type TEXT DEFAULT 'normal' NOT NULL,
+            direct_branch TEXT,
+            position INTEGER DEFAULT 0 NOT NULL,
+            created_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL,
+            FOREIGN KEY (project_id) REFERENCES projects(id) ON UPDATE no action ON DELETE cascade
+        )"#,
+    )
+    .execute(&pool)
+    .await?;
+
+    sqlx::query(
+        r#"CREATE INDEX IF NOT EXISTS idx_tasks_project_id
+           ON tasks(project_id)"#,
+    )
+    .execute(&pool)
+    .await?;
+
+    sqlx::query(
+        r#"CREATE INDEX IF NOT EXISTS idx_tasks_project_status
+           ON tasks(project_id, status)"#,
+    )
+    .execute(&pool)
+    .await?;
+
+    sqlx::query(
+        r#"CREATE TABLE IF NOT EXISTS workspaces (
+            id TEXT PRIMARY KEY NOT NULL,
+            task_id TEXT NOT NULL,
+            branch TEXT NOT NULL,
+            base_branch TEXT,
+            agent_working_dir TEXT,
+            setup_completed_at INTEGER,
+            agent_cli TEXT DEFAULT 'OPENCODE' NOT NULL,
+            archived INTEGER DEFAULT 0 NOT NULL,
+            pinned INTEGER DEFAULT 0 NOT NULL,
+            created_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL,
+            FOREIGN KEY (task_id) REFERENCES tasks(id) ON UPDATE no action ON DELETE cascade
+        )"#,
+    )
+    .execute(&pool)
+    .await?;
+
+    sqlx::query(
+        r#"CREATE INDEX IF NOT EXISTS idx_workspaces_task_id
+           ON workspaces(task_id)"#,
+    )
+    .execute(&pool)
+    .await?;
+
+    sqlx::query(
+        r#"CREATE TABLE IF NOT EXISTS sessions (
+            id TEXT PRIMARY KEY NOT NULL,
+            workspace_id TEXT NOT NULL,
+            agent_cli TEXT DEFAULT 'OPENCODE' NOT NULL,
+            created_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL,
+            FOREIGN KEY (workspace_id) REFERENCES workspaces(id) ON UPDATE no action ON DELETE cascade
+        )"#,
+    )
+    .execute(&pool)
+    .await?;
+
+    sqlx::query(
+        r#"CREATE INDEX IF NOT EXISTS idx_sessions_workspace_id
+           ON sessions(workspace_id)"#,
     )
     .execute(&pool)
     .await?;

@@ -536,7 +536,7 @@ export function SettingsPage() {
               <h3 className="text-base font-semibold text-foreground">{aboutTexts.linksTitle}</h3>
               <div className="mt-4 flex flex-wrap gap-3">
                 <a
-                  href="https://github.com/hivelaunch/hivelaunch"
+                  href="https://github.com/MarcusYuan/HiveLaunch"
                   target="_blank"
                   rel="noreferrer"
                   className="inline-flex items-center gap-2 rounded-lg border border-border px-3 py-2 text-sm text-muted-foreground transition-colors hover:border-ring/50 hover:text-foreground"
@@ -545,25 +545,7 @@ export function SettingsPage() {
                   <ExternalLink className="h-4 w-4" />
                 </a>
                 <a
-                  href="https://gitee.com/hivelaunch/hivelaunch"
-                  target="_blank"
-                  rel="noreferrer"
-                  className="inline-flex items-center gap-2 rounded-lg border border-border px-3 py-2 text-sm text-muted-foreground transition-colors hover:border-ring/50 hover:text-foreground"
-                >
-                  {aboutTexts.giteeLabel}
-                  <ExternalLink className="h-4 w-4" />
-                </a>
-                <a
-                  href="https://docs.hivelaunch.io"
-                  target="_blank"
-                  rel="noreferrer"
-                  className="inline-flex items-center gap-2 rounded-lg border border-border px-3 py-2 text-sm text-muted-foreground transition-colors hover:border-ring/50 hover:text-foreground"
-                >
-                  {aboutTexts.docsLabel}
-                  <ExternalLink className="h-4 w-4" />
-                </a>
-                <a
-                  href="http://localhost:4321/"
+                  href="https://hivelaunch.bees-data.com"
                   target="_blank"
                   rel="noreferrer"
                   className="inline-flex items-center gap-2 rounded-lg border border-border px-3 py-2 text-sm text-muted-foreground transition-colors hover:border-ring/50 hover:text-foreground"
@@ -583,22 +565,13 @@ export function SettingsPage() {
                 </div>
                 <div className="mt-3 flex flex-wrap gap-3">
                   <a
-                    href="https://github.com/hivelaunch/hivelaunch/stargazers"
+                    href="https://github.com/MarcusYuan/HiveLaunch/stargazers"
                     target="_blank"
                     rel="noreferrer"
                     className="inline-flex items-center gap-2 rounded-lg bg-primary px-3 py-2 text-sm font-medium text-primary-foreground transition-colors hover:opacity-90"
                   >
                     <Star className="h-4 w-4" />
                     {aboutTexts.starGithub}
-                  </a>
-                  <a
-                    href="https://gitee.com/hivelaunch/hivelaunch"
-                    target="_blank"
-                    rel="noreferrer"
-                    className="inline-flex items-center gap-2 rounded-lg border border-border px-3 py-2 text-sm text-muted-foreground transition-colors hover:border-ring/50 hover:text-foreground"
-                  >
-                    <Star className="h-4 w-4" />
-                    {aboutTexts.starGitee}
                   </a>
                 </div>
               </div>

@@ -46,6 +46,9 @@ export function streamJsonPatchEntries<E = unknown>(
 ): StreamController<E> {
   let connected = false
   let terminal = false
+  let hasOpened = false
+  let retryAttempts = 0
+  let reconnectTimer: ReturnType<typeof setTimeout> | null = null
   let snapshot: PatchContainer<E> = structuredClone(
     opts.initial ?? ({ entries: [] } as PatchContainer<E>)
   )
@@ -55,7 +58,49 @@ export function streamJsonPatchEntries<E = unknown>(
 
   // Convert HTTP endpoint to WebSocket endpoint
   const wsUrl = url.replace(/^http/, 'ws')
-  const ws: TransportWebSocketLike = createTransportWebSocket(wsUrl)
+  let ws: TransportWebSocketLike | null = null
+  const isLocalDesktopWsEndpoint = (endpoint: string): boolean => {
+    try {
+      const parsed = new URL(endpoint)
+      return (
+        (parsed.protocol === 'ws:' || parsed.protocol === 'wss:') &&
+        (parsed.hostname === '127.0.0.1' || parsed.hostname === 'localhost') &&
+        parsed.port === '3847'
+      )
+    } catch {
+      return false
+    }
+  }
+  const resolveHealthUrl = (endpoint: string): string | null => {
+    try {
+      const parsed = new URL(endpoint.replace(/^ws(s?):\/\//, 'http$1://'))
+      parsed.pathname = '/health'
+      parsed.search = ''
+      parsed.hash = ''
+      return parsed.toString()
+    } catch {
+      return null
+    }
+  }
+  const waitForBackendReady = async (endpoint: string): Promise<boolean> => {
+    const healthUrl = resolveHealthUrl(endpoint)
+    if (!healthUrl) return false
+    for (let i = 0; i < 6; i += 1) {
+      if (terminal) return false
+      const controller = new AbortController()
+      const timeout = setTimeout(() => controller.abort(), 800)
+      try {
+        const resp = await fetch(healthUrl, { cache: 'no-store', signal: controller.signal })
+        if (resp.ok) {
+          clearTimeout(timeout)
+          return true
+        }
+      } catch {}
+      clearTimeout(timeout)
+      await new Promise((resolve) => setTimeout(resolve, Math.min(1200, 200 * Math.pow(2, i))))
+    }
+    return false
+  }
 
   const notify = () => {
     for (const cb of subscribers) {
@@ -77,7 +122,7 @@ export function streamJsonPatchEntries<E = unknown>(
       if (msg?.error) {
         terminal = true
         opts.onError?.(new Error(String(msg.error)))
-        ws.close()
+        ws?.close()
         return
       }
 
@@ -108,7 +153,7 @@ export function streamJsonPatchEntries<E = unknown>(
         console.log('[streamJsonPatchEntries] Finished message received, total entries:', snapshot.entries.length)
         terminal = true
         opts.onFinished?.(snapshot.entries)
-        ws.close()
+        ws?.close()
       }
     } catch (err) {
       console.error('[streamJsonPatchEntries] Error handling message:', err)
@@ -116,25 +161,64 @@ export function streamJsonPatchEntries<E = unknown>(
     }
   }
 
-  ws.addEventListener('open', () => {
-    connected = true
-    opts.onConnect?.()
-  })
+  const connect = () => {
+    if (terminal) return
+    void (async () => {
+      if (isLocalDesktopWsEndpoint(wsUrl)) {
+        const ready = await waitForBackendReady(wsUrl)
+        if (!ready || terminal) {
+          if (!terminal && retryAttempts < 5) {
+            const delay = Math.min(4000, 500 * Math.pow(2, retryAttempts))
+            retryAttempts += 1
+            reconnectTimer = setTimeout(() => {
+              reconnectTimer = null
+              connect()
+            }, delay)
+            return
+          }
+          if (!terminal) {
+            opts.onError?.(new Error('WebSocket closed before finished'))
+          }
+          return
+        }
+      }
+      const socket = createTransportWebSocket(wsUrl)
+      ws = socket
+      socket.addEventListener('open', () => {
+        if (ws !== socket) return
+        connected = true
+        hasOpened = true
+        retryAttempts = 0
+        opts.onConnect?.()
+      })
+      socket.addEventListener('message', handleMessage)
+      socket.addEventListener('error', (err) => {
+        if (ws !== socket) return
+        console.error('[streamJsonPatchEntries] WebSocket error:', err)
+        connected = false
+      })
+      socket.addEventListener('close', () => {
+        if (ws !== socket) return
+        ws = null
+        connected = false
+        if (terminal) {
+          return
+        }
+        if (!hasOpened && retryAttempts < 5) {
+          const delay = Math.min(4000, 500 * Math.pow(2, retryAttempts))
+          retryAttempts += 1
+          reconnectTimer = setTimeout(() => {
+            reconnectTimer = null
+            connect()
+          }, delay)
+          return
+        }
+        opts.onError?.(new Error('WebSocket closed before finished'))
+      })
+    })()
+  }
 
-  ws.addEventListener('message', handleMessage)
-
-  ws.addEventListener('error', (err) => {
-    console.error('[streamJsonPatchEntries] WebSocket error:', err)
-    connected = false
-    opts.onError?.(err)
-  })
-
-  ws.addEventListener('close', () => {
-    connected = false
-    if (!terminal) {
-      opts.onError?.(new Error('WebSocket closed before finished'))
-    }
-  })
+  connect()
 
   return {
     getEntries(): E[] {
@@ -153,7 +237,12 @@ export function streamJsonPatchEntries<E = unknown>(
       return () => subscribers.delete(cb)
     },
     close(): void {
-      ws.close()
+      terminal = true
+      if (reconnectTimer) {
+        clearTimeout(reconnectTimer)
+        reconnectTimer = null
+      }
+      ws?.close()
       subscribers.clear()
       connected = false
     },

@@ -24,6 +24,7 @@ import {
   getRemoteAccessStatus,
   regenerateRemoteAccessKey,
   removePairedDevice,
+  updateDeviceName,
   type EnableRemoteAccessResponse,
   type RemoteAccessStatus,
 } from '../lib/remote-access-api'
@@ -40,6 +41,7 @@ const initialStatus: RemoteAccessStatus = {
   deviceId: null,
   pairingKey: null,
   relayUrl: null,
+  deviceName: null,
   connectionState: 'disabled',
   lastError: null,
   pairedDevices: [],
@@ -267,7 +269,8 @@ export function RemoteAccessSection({ texts = defaultTexts }: RemoteAccessSectio
   const [desktopTestPending, setDesktopTestPending] = useState(false)
   const [message, setMessage] = useState<MessageState>(null)
   const [relayUrl, setRelayUrl] = useState(getDefaultRelayWsUrl())
-  const [deviceName, setDeviceName] = useState('Bee Desktop')
+  const [deviceName, setDeviceName] = useState('')
+  const [deviceNamePending, setDeviceNamePending] = useState(false)
   const [mobileRelayUrl, setMobileRelayUrl] = useState(() =>
     readStoredValue(MOBILE_RELAY_URL_KEY, getDefaultMobileRelayWsUrl())
   )
@@ -307,6 +310,9 @@ export function RemoteAccessSection({ texts = defaultTexts }: RemoteAccessSectio
       setStatus(data)
       if (data.relayUrl) {
         setRelayUrl(data.relayUrl)
+      }
+      if (data.deviceName) {
+        setDeviceName(data.deviceName)
       }
       if (data.deviceId && data.pairingKey && data.relayUrl) {
         setDesktopQrPayload(buildRemoteAccessLink(data.deviceId, data.pairingKey, data.relayUrl))
@@ -463,6 +469,28 @@ export function RemoteAccessSection({ texts = defaultTexts }: RemoteAccessSectio
       setMessage({ type: 'error', text })
     } finally {
       setPending(false)
+    }
+  }
+
+  const handleUpdateDeviceName = async () => {
+    if (!deviceName.trim()) {
+      setMessage({ type: 'error', text: 'Device name cannot be empty' })
+      return
+    }
+    setDeviceNamePending(true)
+    setMessage(null)
+    try {
+      await updateDeviceName(deviceName.trim())
+      setStatus((prev) => ({
+        ...prev,
+        deviceName: deviceName.trim(),
+      }))
+      setMessage({ type: 'success', text: 'Device name updated' })
+    } catch (error) {
+      const text = error instanceof Error ? error.message : 'Failed to update device name'
+      setMessage({ type: 'error', text })
+    } finally {
+      setDeviceNamePending(false)
     }
   }
 
@@ -714,12 +742,24 @@ export function RemoteAccessSection({ texts = defaultTexts }: RemoteAccessSectio
             </div>
             <div>
               <label className="mb-2 block text-sm font-medium">{texts.desktopDeviceNameLabel}</label>
-              <input
-                value={deviceName}
-                onChange={(e) => setDeviceName(e.target.value)}
-                className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm text-foreground placeholder:text-muted-foreground"
-                placeholder="Bee Desktop"
-              />
+              <div className="flex gap-2">
+                <input
+                  value={deviceName}
+                  onChange={(e) => setDeviceName(e.target.value)}
+                  className="flex-1 rounded-md border border-input bg-background px-3 py-2 text-sm text-foreground placeholder:text-muted-foreground"
+                  placeholder="Bee Desktop"
+                />
+                {status.enabled && (
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => void handleUpdateDeviceName()}
+                    disabled={deviceNamePending || !deviceName.trim()}
+                  >
+                    {deviceNamePending ? <Loader2 className="h-4 w-4 animate-spin" /> : 'Save'}
+                  </Button>
+                )}
+              </div>
             </div>
           </div>
           <div className="mt-4 flex flex-wrap gap-2">

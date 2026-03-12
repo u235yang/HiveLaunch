@@ -32,7 +32,11 @@ function hasTauriRuntimeMarkers(): boolean {
   if (!isBrowser) return false
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const w = window as any
-  return typeof w.__TAURI__ !== 'undefined' || typeof w.__TAURI_INTERNALS__ !== 'undefined'
+  const hasMarkers = typeof w.__TAURI__ !== 'undefined' || typeof w.__TAURI_INTERNALS__ !== 'undefined'
+  if (!hasMarkers) return false
+  const internalInvoke = w.__TAURI_INTERNALS__?.invoke
+  const coreInvoke = w.__TAURI__?.core?.invoke
+  return typeof internalInvoke === 'function' || typeof coreInvoke === 'function'
 }
 
 function getDefaultLanApiBase(): string {
@@ -213,6 +217,22 @@ function sanitizeApiBase(value: string): string {
   return value.trim().replace(/\/$/, '')
 }
 
+function sanitizeHttpBase(value: string): string {
+  const sanitized = sanitizeApiBase(value)
+  if (!sanitized) return ''
+  if (/^https?:\/\//.test(sanitized)) return sanitized
+  if (/^wss?:\/\//.test(sanitized)) return toHttpBaseFromWs(sanitized)
+  return ''
+}
+
+function sanitizeWsBase(value: string): string {
+  const sanitized = sanitizeApiBase(value)
+  if (!sanitized) return ''
+  if (/^wss?:\/\//.test(sanitized)) return sanitized
+  if (/^https?:\/\//.test(sanitized)) return toWsBaseFromHttp(sanitized)
+  return ''
+}
+
 function toWsBaseFromHttp(httpBase: string): string {
   if (!httpBase) return ''
   try {
@@ -248,14 +268,14 @@ function getStoredMobileDirectApiBase(): string | null {
   if (!isBrowser) return null
   const value = window.localStorage.getItem(MOBILE_DIRECT_API_BASE_KEY)
   if (!value) return null
-  return sanitizeApiBase(value)
+  return sanitizeHttpBase(value) || null
 }
 
 function getStoredMobileRelaySettings():
   | { relayUrl: string; deviceId: string; pairingKey: string; deviceName: string }
   | null {
   if (!isBrowser) return null
-  const relayUrl = window.localStorage.getItem(MOBILE_RELAY_URL_KEY)?.trim() || ''
+  const relayUrl = sanitizeWsBase(window.localStorage.getItem(MOBILE_RELAY_URL_KEY)?.trim() || '')
   const deviceId = window.localStorage.getItem(MOBILE_RELAY_DEVICE_ID_KEY)?.trim() || ''
   const pairingKey = window.localStorage.getItem(MOBILE_RELAY_PAIRING_KEY_KEY)?.trim() || ''
   const deviceName = window.localStorage.getItem(MOBILE_RELAY_DEVICE_NAME_KEY)?.trim() || 'Bee Mobile'
@@ -1109,8 +1129,8 @@ function getWsBase(): string {
 
 function buildDefaultTransportBases(): { apiBase: string; realtimeBase: string } {
   if (envApiBase || envWsBase) {
-    const apiBase = envApiBase || toHttpBaseFromWs(envWsBase)
-    const realtimeBase = envWsBase || toWsBaseFromHttp(envApiBase)
+    const apiBase = sanitizeHttpBase(envApiBase || '') || toHttpBaseFromWs(envWsBase || '')
+    const realtimeBase = sanitizeWsBase(envWsBase || '') || toWsBaseFromHttp(envApiBase || '')
     return { apiBase, realtimeBase }
   }
 
@@ -1132,15 +1152,14 @@ function buildDefaultTransportBases(): { apiBase: string; realtimeBase: string }
   }
 
   if (process.env.NODE_ENV === 'production') {
-    const apiBase = CLOUD_API_BASE || toHttpBaseFromWs(CLOUD_WS_BASE)
-    const realtimeBase = CLOUD_WS_BASE || toWsBaseFromHttp(CLOUD_API_BASE)
+    const apiBase = sanitizeHttpBase(CLOUD_API_BASE) || toHttpBaseFromWs(CLOUD_WS_BASE)
+    const realtimeBase = sanitizeWsBase(CLOUD_WS_BASE) || toWsBaseFromHttp(CLOUD_API_BASE)
     return { apiBase, realtimeBase }
   }
 
   if (isBrowser && window.location.origin) {
     const url = new URL(window.location.origin)
     url.protocol = browserWsProtocol
-    url.port = TAURI_PORT
     return { apiBase: '', realtimeBase: url.toString().replace(/\/$/, '') }
   }
 
@@ -1209,11 +1228,39 @@ export function resolveHttpUrl(path: string): string {
   const normalizedPath = normalizeApiPath(path)
   if (/^https?:\/\//.test(normalizedPath)) return normalizedPath
   const snapshot = getTransportSnapshot()
-  if (!snapshot.apiBase) return normalizedPath
+  const normalizedApiBase = sanitizeHttpBase(snapshot.apiBase)
+  if (!normalizedApiBase) {
+    if (isTauriEnvironment()) {
+      return `http://127.0.0.1:${TAURI_PORT}${normalizedPath}`
+    }
+    return normalizedPath
+  }
   try {
-    return new URL(normalizedPath, snapshot.apiBase).toString().replace(/\/$/, '')
+    return new URL(normalizedPath, normalizedApiBase).toString().replace(/\/$/, '')
   } catch {
-    return `${snapshot.apiBase}${normalizedPath}`
+    if (typeof window !== 'undefined') {
+      console.error('[api-config] resolveHttpUrl_failed', {
+        path,
+        normalizedPath,
+        snapshotMode: snapshot.mode,
+        snapshotApiBase: snapshot.apiBase,
+        normalizedApiBase,
+        locationOrigin: window.location.origin,
+        envApiBase,
+        envWsBase,
+      })
+    } else {
+      console.error('[api-config] resolveHttpUrl_failed', {
+        path,
+        normalizedPath,
+        snapshotMode: snapshot.mode,
+        snapshotApiBase: snapshot.apiBase,
+        normalizedApiBase,
+        envApiBase,
+        envWsBase,
+      })
+    }
+    return `${normalizedApiBase}${normalizedPath}`
   }
 }
 
@@ -1221,11 +1268,17 @@ export function resolveRealtimeUrl(path: string): string {
   const normalizedPath = normalizeRealtimePath(path)
   if (/^wss?:\/\//.test(normalizedPath)) return normalizedPath
   const snapshot = getTransportSnapshot()
-  if (!snapshot.realtimeBase) return normalizedPath
+  const normalizedRealtimeBase = sanitizeWsBase(snapshot.realtimeBase)
+  if (!normalizedRealtimeBase) {
+    if (isTauriEnvironment()) {
+      return `${browserWsProtocol}://127.0.0.1:${TAURI_PORT}${normalizedPath}`
+    }
+    return normalizedPath
+  }
   try {
-    return new URL(normalizedPath, snapshot.realtimeBase).toString().replace(/\/$/, '')
+    return new URL(normalizedPath, normalizedRealtimeBase).toString().replace(/\/$/, '')
   } catch {
-    return `${snapshot.realtimeBase}${normalizedPath}`
+    return `${normalizedRealtimeBase}${normalizedPath}`
   }
 }
 
@@ -1244,12 +1297,12 @@ export function setMobileConnectionMode(mode: MobileConnectionMode): void {
 export function getMobileDirectApiBase(): string {
   const saved = getStoredMobileDirectApiBase()
   if (saved) return saved
-  return sanitizeApiBase(LAN_API_BASE)
+  return sanitizeHttpBase(LAN_API_BASE)
 }
 
 export function setMobileDirectApiBase(value: string): void {
   if (!isBrowser) return
-  const sanitized = sanitizeApiBase(value)
+  const sanitized = sanitizeHttpBase(value)
   if (!sanitized) return
   window.localStorage.setItem(MOBILE_DIRECT_API_BASE_KEY, sanitized)
   notifyTransportSnapshotChanged()

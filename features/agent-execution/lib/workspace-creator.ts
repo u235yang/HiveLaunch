@@ -87,6 +87,53 @@ export interface BranchDiffStats {
   commits_behind: number
 }
 
+interface RepoBranch {
+  name: string
+  is_current: boolean
+  is_remote: boolean
+}
+
+function normalizeBranchName(name: string): string {
+  const trimmed = name.trim()
+  if (!trimmed) return ''
+  if (trimmed.includes('->')) {
+    const parts = trimmed.split('->')
+    return (parts[parts.length - 1] || '').trim().replace(/^origin\//, '')
+  }
+  return trimmed.replace(/^origin\//, '').replace(/^remotes\//, '')
+}
+
+async function listRepoBranches(repoPath: string): Promise<RepoBranch[]> {
+  const response = await fetch(
+    resolveHttpUrl(`/api/git/branches?path=${encodeURIComponent(repoPath)}`)
+  )
+  if (!response.ok) {
+    throw new Error(`Failed to list branches (${response.status}): ${await response.text()}`)
+  }
+  const raw = await response.json() as unknown
+  if (!Array.isArray(raw)) {
+    return []
+  }
+  return raw
+    .filter((item): item is Record<string, unknown> => !!item && typeof item === 'object')
+    .map((item) => ({
+      name: normalizeBranchName(typeof item.name === 'string' ? item.name : ''),
+      is_current: Boolean(item.is_current),
+      is_remote: Boolean(item.is_remote),
+    }))
+    .filter((item) => item.name !== '')
+}
+
+function resolveBaseBranch(targetBranch: string, branches: RepoBranch[]): string {
+  const normalizedTarget = normalizeBranchName(targetBranch || '')
+  const names = new Set(branches.map((b) => b.name))
+
+  if (normalizedTarget && names.has(normalizedTarget)) {
+    return normalizedTarget
+  }
+  return normalizedTarget || 'main'
+}
+
 /**
  * 创建新的 Workspace（包括 Git Worktree）
  *
@@ -121,31 +168,89 @@ export async function createWorkspace(
   console.log('[workspace-creator] config.targetBranch:', config.targetBranch)
   // 修复：使用 'main' 作为默认值，而不是硬编码的 'master'
   // 更好的做法是从项目配置中读取 targetBranch
-  const baseBranch = config.targetBranch || 'main'
+  let branches: RepoBranch[] = []
+  try {
+    branches = await listRepoBranches(config.repoPath)
+  } catch (error) {
+    console.warn('[workspace-creator] failed to list branches, fallback to requested branch:', {
+      repoPath: config.repoPath,
+      targetBranch: config.targetBranch,
+      error: error instanceof Error ? error.message : String(error),
+    })
+  }
+  const baseBranch = resolveBaseBranch(config.targetBranch, branches)
   console.log('[workspace-creator] baseBranch:', baseBranch)
+  const requestedBranch = normalizeBranchName(config.targetBranch)
+  const availableBranchNames = new Set(branches.map((branch) => branch.name))
+  if (branches.length > 0 && requestedBranch && !availableBranchNames.has(requestedBranch)) {
+    console.error('[workspace-creator] target branch does not exist:', {
+      requested: config.targetBranch,
+      resolved: baseBranch,
+      repoPath: config.repoPath,
+      availableBranchCount: branches.length,
+    })
+    throw new Error(`Target branch "${config.targetBranch}" does not exist in repository`)
+  }
 
-  // 统一使用 HTTP API 创建 workspace
-  const worktreeInfo = await httpRequest<WorktreeInfo>('/api/workspaces', {
-    repo_path: config.repoPath,
-    branch: worktreeBranch,
-    base_branch: baseBranch,
-  })
+  let rawWorktreeInfo: Record<string, unknown> | string | null = null
+  try {
+    rawWorktreeInfo = await httpRequest<Record<string, unknown> | string>('/api/workspaces', {
+      repo_path: config.repoPath,
+      branch: worktreeBranch,
+      base_branch: baseBranch,
+    })
+  } catch (error) {
+    const errorMessage = error instanceof Error ? error.message : String(error)
+    const invalidReference = errorMessage.includes('invalid reference')
+    const noCommitHint = branches.length === 0 || errorMessage.includes('Needed a single revision')
+    if (invalidReference && noCommitHint) {
+      throw new Error('Repository has no valid commits yet. Please create an initial commit before creating workspace.')
+    }
+    throw error
+  }
+
+  const parsed = typeof rawWorktreeInfo === 'object' && rawWorktreeInfo
+    ? rawWorktreeInfo as Record<string, unknown>
+    : {}
+
+  const worktreeId = typeof parsed.id === 'string' ? parsed.id.trim() : ''
+  const worktreePath = typeof parsed.path === 'string' ? parsed.path.trim() : ''
+  const worktreeBranchFromResponse = typeof parsed.branch === 'string' ? parsed.branch.trim() : ''
+  const baseBranchFromResponse =
+    typeof parsed.baseBranch === 'string'
+      ? parsed.baseBranch
+      : (typeof parsed.base_branch === 'string' ? parsed.base_branch : undefined)
+
+  if (!worktreeId || !worktreePath || !worktreeBranchFromResponse) {
+    console.error('[workspace-creator] Invalid create workspace response:', {
+      rawWorktreeInfo,
+      repoPath: config.repoPath,
+      targetBranch: config.targetBranch,
+      worktreeBranch,
+      baseBranch,
+      availableBranchCount: branches.length,
+    })
+    if (typeof rawWorktreeInfo === 'string' && rawWorktreeInfo.includes('invalid reference')) {
+      throw new Error(`Cannot create workspace from branch "${baseBranch}". The branch may have no commit yet.`)
+    }
+    throw new Error('Invalid workspace response: missing id/path/branch')
+  }
 
   // 如果有 setup 脚本，运行它
   if (config.setupScript) {
-    await runSetupScript(config.setupScript, worktreeInfo.path)
+    await runSetupScript(config.setupScript, worktreePath)
   }
 
   // 如果有需要拷贝的文件
   if (config.copyFiles && config.copyFiles.length > 0) {
-    await copyFiles(config.copyFiles, worktreeInfo.path)
+    await copyFiles(config.copyFiles, worktreePath)
   }
 
   return {
-    id: worktreeInfo.id,
-    branch: worktreeInfo.branch,
-    path: worktreeInfo.path,
-    baseBranch: worktreeInfo.baseBranch || baseBranch,  // 返回目标分支
+    id: worktreeId,
+    branch: worktreeBranchFromResponse,
+    path: worktreePath,
+    baseBranch: baseBranchFromResponse || baseBranch,
     createdAt: new Date().toISOString(),
   }
 }

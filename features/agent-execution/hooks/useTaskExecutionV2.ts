@@ -65,15 +65,29 @@ async function saveWorkspaceToDb(
   agentCli: string
 ): Promise<{ workspaceId: string } | null> {
   try {
+    const normalizedWorkspaceId = (worktreeInfo.id || '').trim()
+    const normalizedBranch = (
+      (typeof worktreeInfo.branch === 'string' && worktreeInfo.branch) ||
+      (typeof worktreeInfo.baseBranch === 'string' && worktreeInfo.baseBranch) ||
+      'main'
+    ).trim()
+    const normalizedPath = (worktreeInfo.path || '').trim()
+    if (!normalizedWorkspaceId) {
+      console.error('[useTaskExecutionV2] saveWorkspaceToDb called with empty workspace id', {
+        taskId,
+        worktreeInfo,
+        agentCli,
+      })
+    }
     const response = await fetch(resolveHttpUrl(`/api/tasks/${taskId}/workspaces`), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         // 使用与 git worktree 相同的 ID，确保 Rust HTTP Server 能查到
-        workspaceId: worktreeInfo.id,
-        branch: worktreeInfo.branch,
+        workspaceId: normalizedWorkspaceId || undefined,
+        branch: normalizedBranch,
         baseBranch: worktreeInfo.baseBranch || null,
-        agentWorkingDir: worktreeInfo.path,
+        agentWorkingDir: normalizedPath,
         agentCli,
       }),
     })
@@ -83,9 +97,23 @@ async function saveWorkspaceToDb(
       return null
     }
 
-    const workspace = await response.json()
+    const workspace = await response.json() as Record<string, unknown>
+    const dbWorkspaceId = (
+      (typeof workspace.id === 'string' && workspace.id) ||
+      (typeof workspace.workspaceId === 'string' && workspace.workspaceId) ||
+      (typeof workspace.workspace_id === 'string' && workspace.workspace_id) ||
+      ''
+    ).trim()
+    if (!dbWorkspaceId) {
+      console.error('[useTaskExecutionV2] saveWorkspaceToDb response missing workspace id', {
+        taskId,
+        requestWorkspaceId: normalizedWorkspaceId,
+        response: workspace,
+      })
+      return null
+    }
     // 后端应该返回与 worktree 相同的 ID
-    return { workspaceId: workspace.id }
+    return { workspaceId: dbWorkspaceId }
   } catch (error) {
     console.error('[useTaskExecutionV2] Error saving workspace to DB:', error)
     return null
@@ -192,16 +220,28 @@ export function useTaskExecutionV2({
         if (!wsResponse.ok) {
           throw new Error('Failed to fetch workspace details')
         }
-        const wsData = await wsResponse.json()
+        const wsData = await wsResponse.json() as Record<string, unknown>
 
         if (cancelled) return
 
         // 设置 workspace 信息（包含真实的 path 和 branch）
         const existingWorkspace: WorkspaceInfo = {
-          id: wsData.id,
-          branch: wsData.branch || '',
-          path: wsData.agentWorkingDir || '',
-          createdAt: wsData.createdAt || new Date().toISOString(),
+          id: String(wsData.id || initialWorkspaceId),
+          branch: String(
+            wsData.branch ||
+            wsData.baseBranch ||
+            wsData.base_branch ||
+            'main'
+          ),
+          path: String(
+            wsData.agentWorkingDir ||
+            wsData.agent_working_dir ||
+            ''
+          ),
+          baseBranch: typeof wsData.baseBranch === 'string'
+            ? wsData.baseBranch
+            : (typeof wsData.base_branch === 'string' ? wsData.base_branch : undefined),
+          createdAt: String(wsData.createdAt || wsData.created_at || new Date().toISOString()),
         }
         workspaceRef.current = existingWorkspace
         setWorkspace(existingWorkspace)
@@ -281,8 +321,15 @@ export function useTaskExecutionV2({
 
   // 初始化 workspace
   const initializeWorkspace = useCallback(async (): Promise<WorkspaceInfo> => {
-    if (workspaceRef.current) {
+    if (workspaceRef.current?.id?.trim()) {
       return workspaceRef.current
+    }
+    workspaceRef.current = null
+    if (!taskId.trim()) {
+      throw new Error('Cannot initialize workspace: task id is empty')
+    }
+    if (!repoPath.trim()) {
+      throw new Error('Cannot initialize workspace: repo path is empty')
     }
 
     setIsStarting(true)
@@ -290,7 +337,7 @@ export function useTaskExecutionV2({
       // 处理直接任务：使用主仓库路径，不创建 worktree
       if (taskType === 'direct' && directBranch) {
         console.log('[useTaskExecutionV2] Direct task mode:', { directBranch, repoPath })
-        const directWorkspace: WorkspaceInfo = {
+        let directWorkspace: WorkspaceInfo = {
           id: `direct-${taskId.slice(-8)}`,
           branch: directBranch,
           path: repoPath,  // 使用主仓库路径
@@ -302,6 +349,12 @@ export function useTaskExecutionV2({
         const dbWorkspace = await saveWorkspaceToDb(taskId, directWorkspace, agentCli)
         if (!dbWorkspace) {
           throw new Error('Failed to save workspace to database')
+        }
+        if (dbWorkspace.workspaceId !== directWorkspace.id) {
+          directWorkspace = {
+            ...directWorkspace,
+            id: dbWorkspace.workspaceId,
+          }
         }
 
         workspaceRef.current = directWorkspace
@@ -331,20 +384,42 @@ export function useTaskExecutionV2({
       if (!dbWorkspace) {
         throw new Error('Failed to save workspace to database')
       }
+      const resolvedWorkspaceId = (
+        (newWorkspace.id || '').trim() ||
+        (dbWorkspace.workspaceId || '').trim()
+      )
+      if (!resolvedWorkspaceId) {
+        console.error('[useTaskExecutionV2] initializeWorkspace missing workspace id after creation', {
+          taskId,
+          repoPath,
+          targetBranch,
+          initialBranch,
+          taskType,
+          directBranch,
+          newWorkspace,
+          dbWorkspace,
+        })
+        throw new Error('Workspace created but id is empty')
+      }
+      const normalizedWorkspace = {
+        ...newWorkspace,
+        id: resolvedWorkspaceId,
+      }
 
       // 验证数据库 ID 与 worktree ID 一致（用于调试）
-      if (dbWorkspace.workspaceId !== newWorkspace.id) {
+      if ((dbWorkspace.workspaceId || '').trim() !== resolvedWorkspaceId) {
         console.warn('[useTaskExecutionV2] Workspace ID mismatch:', {
           worktreeId: newWorkspace.id,
           dbId: dbWorkspace.workspaceId,
+          resolvedWorkspaceId,
         })
       }
 
-      workspaceRef.current = newWorkspace
-      setWorkspace(newWorkspace)
+      workspaceRef.current = normalizedWorkspace
+      setWorkspace(normalizedWorkspace)
       setIsInitialized(true)
 
-      return newWorkspace
+      return normalizedWorkspace
     } finally {
       setIsStarting(false)
     }
@@ -367,13 +442,45 @@ export function useTaskExecutionV2({
 
           // 获取 workspace：如果已存在则复用，否则创建新的
           let workspaceToUse = workspaceRef.current
-          if (!workspaceToUse) {
+          if (!workspaceToUse?.id?.trim()) {
+            workspaceRef.current = null
             workspaceToUse = await initializeWorkspace()
+          }
+          const fallbackWorkspaceId = (initialWorkspaceIdRef.current || '').trim()
+          const ensuredWorkspaceId = (workspaceToUse.id || '').trim() || fallbackWorkspaceId
+          if (!ensuredWorkspaceId) {
+            workspaceRef.current = null
+            workspaceToUse = await initializeWorkspace()
+          }
+          const recoveredWorkspaceId =
+            (workspaceToUse.id || '').trim() || (initialWorkspaceIdRef.current || '').trim()
+          if (!recoveredWorkspaceId) {
+            console.error('[useTaskExecutionV2] Failed to initialize workspace id', {
+              taskId,
+              initialWorkspaceId: initialWorkspaceIdRef.current,
+              workspaceToUse,
+              workspaceRefCurrent: workspaceRef.current,
+              repoPath,
+              targetBranch,
+              initialBranch,
+              taskType,
+              directBranch,
+              agentCli,
+            })
+            throw new Error('Failed to initialize workspace id')
+          }
+          if (workspaceToUse.id !== recoveredWorkspaceId) {
+            workspaceToUse = {
+              ...workspaceToUse,
+              id: recoveredWorkspaceId,
+            }
+            workspaceRef.current = workspaceToUse
+            setWorkspace(workspaceToUse)
           }
 
           // 使用 useCreateSession 创建 session 并发送初始 prompt
           const session = await createSession({
-            workspaceId: workspaceToUse.id,
+            workspaceId: recoveredWorkspaceId,
             workingDir: workspaceToUse.path,
             prompt: message,
             variant,

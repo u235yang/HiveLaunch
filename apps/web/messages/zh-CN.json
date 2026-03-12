@@ -315,13 +315,10 @@
       "privacyDataControl": "代码与数据由你掌控，传输路径清晰可见",
       "linksTitle": "官方链接",
       "githubLabel": "GitHub 仓库",
-      "giteeLabel": "Gitee 仓库",
-      "docsLabel": "产品文档",
       "websiteLabel": "官网",
       "starTitle": "喜欢 蜂启 HiveLaunch？欢迎支持",
       "starDescription": "给项目点个 Star，能帮助更多开发者发现并参与共建。",
-      "starGithub": "去 GitHub 点 Star",
-      "starGitee": "去 Gitee 点 Star"
+      "starGithub": "去 GitHub 点 Star"
     },
     "worktreeSection": {
       "loadError": "加载设置失败",

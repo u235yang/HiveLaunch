@@ -48,13 +48,20 @@ export type ApiResponse<T> = {
 const handleApiResponse = async <T>(response: Response): Promise<T> => {
   if (!response.ok) {
     let errorMessage = `Request failed with status ${response.status}`
+    const rawText = await response.text()
 
-    try {
-      const errorData = await response.json()
-      if (errorData.message) {
-        errorMessage = errorData.message
+    if (rawText) {
+      try {
+        const errorData = JSON.parse(rawText)
+        if (typeof errorData?.message === 'string' && errorData.message.trim()) {
+          errorMessage = errorData.message
+        } else if (typeof errorData?.error === 'string' && errorData.error.trim()) {
+          errorMessage = errorData.error
+        }
+      } catch {
+        errorMessage = rawText.trim() || response.statusText || errorMessage
       }
-    } catch {
+    } else {
       errorMessage = response.statusText || errorMessage
     }
 
@@ -110,14 +117,31 @@ export const sessionsApi = {
    * Create a new session
    */
   create: async (data: {
-    workspace_id: string
+    workspace_id?: string
+    workspaceId?: string
     executor?: string
     working_dir?: string
+    workingDir?: string
     model?: string
+    model_id?: string
+    modelId?: string
   }): Promise<Session> => {
+    const workspace_id = (data.workspace_id || data.workspaceId || '').trim()
+    const executor = data.executor?.trim()
+    const working_dir = (data.working_dir || data.workingDir || '').trim()
+    const model = (data.model || data.model_id || data.modelId || '').trim()
+    if (!workspace_id) {
+      throw new ApiError('workspace_id is required', 400)
+    }
+    const payload = {
+      workspace_id,
+      executor: executor || undefined,
+      working_dir: working_dir || undefined,
+      model: model || undefined,
+    }
     const response = await makeRequest(resolveHttpUrl('/api/sessions'), {
       method: 'POST',
-      body: JSON.stringify(data),
+      body: JSON.stringify(payload),
     })
     return handleApiResponse<Session>(response)
   },

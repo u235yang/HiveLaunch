@@ -57,7 +57,7 @@ export const useJsonPatchWsStream = <T extends object>(
   const [transportNonce, setTransportNonce] = useState(0)
   const finishedRef = useRef<boolean>(false)
   const initializedRef = useRef<boolean>(false)
-  const healthProbeRef = useRef<string | null>(null)
+  const transportSnapshotInitializedRef = useRef<boolean>(false)
   const connectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const isSlashCommandsStream = endpoint?.includes('/api/agents/slash-commands/ws') ?? false
   const isModelDiscoveryStream = endpoint?.includes('/api/agents/discovered-options/ws') ?? false
@@ -80,11 +80,58 @@ export const useJsonPatchWsStream = <T extends object>(
 
   useEffect(() => {
     return subscribeTransportSnapshot(() => {
+      if (!transportSnapshotInitializedRef.current) {
+        transportSnapshotInitializedRef.current = true
+        return
+      }
       setTransportNonce((value) => value + 1)
     })
   }, [])
 
   useEffect(() => {
+    let disposed = false
+    const isLocalDesktopWsEndpoint = (url: string): boolean => {
+      try {
+        const parsed = new URL(url)
+        return (
+          (parsed.protocol === 'ws:' || parsed.protocol === 'wss:') &&
+          (parsed.hostname === '127.0.0.1' || parsed.hostname === 'localhost') &&
+          parsed.port === '3847'
+        )
+      } catch {
+        return false
+      }
+    }
+    const resolveHealthUrl = (url: string): string | null => {
+      try {
+        const parsed = new URL(url.replace(/^ws(s?):\/\//, 'http$1://'))
+        parsed.pathname = '/health'
+        parsed.search = ''
+        parsed.hash = ''
+        return parsed.toString()
+      } catch {
+        return null
+      }
+    }
+    const waitForBackendReady = async (url: string): Promise<boolean> => {
+      const healthUrl = resolveHealthUrl(url)
+      if (!healthUrl) return false
+      for (let i = 0; i < 6; i += 1) {
+        if (disposed) return false
+        const controller = new AbortController()
+        const timeout = setTimeout(() => controller.abort(), 800)
+        try {
+          const resp = await fetch(healthUrl, { cache: 'no-store', signal: controller.signal })
+          if (resp.ok) {
+            clearTimeout(timeout)
+            return true
+          }
+        } catch {}
+        clearTimeout(timeout)
+        await new Promise((resolve) => setTimeout(resolve, Math.min(1200, 200 * Math.pow(2, i))))
+      }
+      return false
+    }
     if (isModelDiscoveryStream) {
       console.info('[model-discovery][ws] effect start', {
         enabled,
@@ -99,6 +146,11 @@ export const useJsonPatchWsStream = <T extends object>(
         retryNonce,
       })
     }
+    const closeSocket = (ws: TransportWebSocketLike) => {
+      if (ws.readyState === WebSocket.OPEN) {
+        ws.close()
+      }
+    }
     if (!enabled || !endpoint) {
       if (isModelDiscoveryStream) {
         console.info('[model-discovery][ws] disabled or missing endpoint, reset state')
@@ -108,8 +160,12 @@ export const useJsonPatchWsStream = <T extends object>(
       }
       // Close connection and reset state
       if (wsRef.current) {
-        wsRef.current.close()
+        closeSocket(wsRef.current)
         wsRef.current = null
+      }
+      if (connectTimerRef.current) {
+        clearTimeout(connectTimerRef.current)
+        connectTimerRef.current = null
       }
       if (retryTimerRef.current) {
         clearTimeout(retryTimerRef.current)
@@ -155,207 +211,206 @@ export const useJsonPatchWsStream = <T extends object>(
       }
     }
 
-    if (
-      healthProbeRef.current !== endpoint &&
-      endpoint.includes('/api/execution-processes/')
-    ) {
-      healthProbeRef.current = endpoint
-      const healthUrl = endpoint
-        .replace(/^ws(s?):\/\//, 'http$1://')
-        .replace(/\/api\/execution-processes\/.*$/, '/health')
-      fetch(healthUrl).catch(() => {
-        // Ignore health probe errors
-      })
-    }
-
     // Create WebSocket if it doesn't exist
     if (!wsRef.current) {
-      // Reset finished flag for new connection
       finishedRef.current = false
       initializedRef.current = false
-
-      if (isSlashCommandsStream) {
-        console.info('[slash-debug][ws] creating websocket', { endpoint })
-      }
-      if (isModelDiscoveryStream) {
-        console.info('[model-discovery][ws] creating websocket', { endpoint })
-      }
-      const ws = createTransportWebSocket(endpoint)
 
       if (connectTimerRef.current) {
         clearTimeout(connectTimerRef.current)
         connectTimerRef.current = null
       }
 
-      ws.onopen = () => {
-        if (isSlashCommandsStream) {
-          console.info('[slash-debug][ws] open')
-        }
-        if (isModelDiscoveryStream) {
-          console.info('[model-discovery][ws] open')
-        }
-        if (connectTimerRef.current) {
-          clearTimeout(connectTimerRef.current)
-          connectTimerRef.current = null
-        }
-        setError(null)
-        setIsConnected(true)
-        // Reset backoff on successful connection
-        retryAttemptsRef.current = 0
-        if (retryTimerRef.current) {
-          clearTimeout(retryTimerRef.current)
-          retryTimerRef.current = null
-        }
-      }
-
-      ws.onerror = (err) => {
-        console.error('[useJsonPatchWsStream] WebSocket error:', err)
-      }
-
-      ws.onmessage = (event) => {
-        try {
-          const msg: WsMsg = JSON.parse(event.data)
-
+      connectTimerRef.current = setTimeout(() => {
+        connectTimerRef.current = null
+        void (async () => {
+          if (disposed || wsRef.current) {
+            return
+          }
+          if (isLocalDesktopWsEndpoint(endpoint)) {
+            const ready = await waitForBackendReady(endpoint)
+            if (!ready || disposed || wsRef.current) {
+              if (!isSlashCommandsStream) {
+                retryAttemptsRef.current += 1
+                scheduleReconnect()
+              } else {
+                setError('Connection failed')
+              }
+              return
+            }
+          }
           if (isSlashCommandsStream) {
-            const msgType =
-              'error' in msg
-                ? 'error'
-                : 'JsonPatch' in msg
-                  ? 'JsonPatch'
-                  : 'Ready' in msg
-                    ? 'Ready'
-                    : 'finished' in msg
-                      ? 'finished'
-                      : 'unknown'
-            console.info('[slash-debug][ws] message', {
-              msgType,
-              raw: event.data,
+            console.info('[slash-debug][ws] creating websocket', { endpoint })
+          }
+          if (isModelDiscoveryStream) {
+            console.info('[model-discovery][ws] creating websocket', { endpoint })
+          }
+          const ws = createTransportWebSocket(endpoint)
+
+          ws.onopen = () => {
+            if (isSlashCommandsStream) {
+              console.info('[slash-debug][ws] open')
+            }
+            if (isModelDiscoveryStream) {
+              console.info('[model-discovery][ws] open')
+            }
+            if (connectTimerRef.current) {
+              clearTimeout(connectTimerRef.current)
+              connectTimerRef.current = null
+            }
+            setError(null)
+            setIsConnected(true)
+            retryAttemptsRef.current = 0
+            if (retryTimerRef.current) {
+              clearTimeout(retryTimerRef.current)
+              retryTimerRef.current = null
+            }
+          }
+
+          ws.onmessage = (event) => {
+          try {
+            const msg: WsMsg = JSON.parse(event.data)
+
+            if (isSlashCommandsStream) {
+              const msgType =
+                'error' in msg
+                  ? 'error'
+                  : 'JsonPatch' in msg
+                    ? 'JsonPatch'
+                    : 'Ready' in msg
+                      ? 'Ready'
+                      : 'finished' in msg
+                        ? 'finished'
+                        : 'unknown'
+              console.info('[slash-debug][ws] message', {
+                msgType,
+                raw: event.data,
+              })
+            }
+            if (isModelDiscoveryStream) {
+              const msgType =
+                'error' in msg
+                  ? 'error'
+                  : 'JsonPatch' in msg
+                    ? 'JsonPatch'
+                    : 'Ready' in msg
+                      ? 'Ready'
+                      : 'finished' in msg
+                        ? 'finished'
+                        : 'unknown'
+              console.info('[model-discovery][ws] message', { msgType })
+            }
+
+            if ('error' in msg) {
+              setError(msg.error)
+              setIsInitialized(true)
+              initializedRef.current = true
+              finishedRef.current = true
+              if (ws.readyState === WebSocket.OPEN) {
+                ws.close(1000, msg.error)
+              }
+              wsRef.current = null
+              setIsConnected(false)
+              return
+            }
+
+            if ('JsonPatch' in msg) {
+              const patches: Operation[] = msg.JsonPatch
+              const filtered = deduplicatePatches
+                ? deduplicatePatches(patches)
+                : patches
+
+              const current = dataRef.current
+              if (!filtered.length || !current) return
+
+              const next = produce(current, (draft) => {
+                applyUpsertPatch(draft as object, filtered)
+              })
+
+              dataRef.current = next
+              setData(next)
+            }
+
+            if ('Ready' in msg) {
+              setIsInitialized(true)
+              initializedRef.current = true
+            }
+
+            if ('finished' in msg) {
+              finishedRef.current = true
+              if (ws.readyState === WebSocket.OPEN) {
+                ws.close(1000, 'finished')
+              }
+              wsRef.current = null
+              setIsConnected(false)
+            }
+          } catch (err) {
+            console.error('[useJsonPatchWsStream] Failed to process message', {
+              error: err,
+              data: event.data,
+            })
+            setError('Failed to process stream update')
+          }
+          }
+
+          ws.onerror = () => {
+            if (finishedRef.current || initializedRef.current) {
+              return
+            }
+            if (isSlashCommandsStream) {
+              console.warn('[slash-debug][ws] error event')
+            }
+            if (isModelDiscoveryStream) {
+              console.warn('[model-discovery][ws] error event')
+            }
+            if (connectTimerRef.current) {
+              clearTimeout(connectTimerRef.current)
+              connectTimerRef.current = null
+            }
+            setError('Connection failed')
+          }
+
+          ws.onclose = (evt) => {
+          if (isSlashCommandsStream) {
+            console.info('[slash-debug][ws] close', {
+              code: evt?.code,
+              reason: evt?.reason,
+              wasClean: evt?.wasClean,
+              finished: finishedRef.current,
             })
           }
           if (isModelDiscoveryStream) {
-            const msgType =
-              'error' in msg
-                ? 'error'
-                : 'JsonPatch' in msg
-                  ? 'JsonPatch'
-                  : 'Ready' in msg
-                    ? 'Ready'
-                    : 'finished' in msg
-                      ? 'finished'
-                      : 'unknown'
-            console.info('[model-discovery][ws] message', { msgType })
+            console.info('[model-discovery][ws] close', {
+              code: evt?.code,
+              reason: evt?.reason,
+              wasClean: evt?.wasClean,
+              finished: finishedRef.current,
+            })
           }
+          if (connectTimerRef.current) {
+            clearTimeout(connectTimerRef.current)
+            connectTimerRef.current = null
+          }
+          setIsConnected(false)
+          wsRef.current = null
 
-          if ('error' in msg) {
-            setError(msg.error)
-            // Mark stream as initialized so UI can stop showing perpetual "loading" states.
-            setIsInitialized(true)
-            initializedRef.current = true
-            finishedRef.current = true
-            ws.close(1000, msg.error)
-            wsRef.current = null
-            setIsConnected(false)
+          if (finishedRef.current || (evt?.code === 1000 && evt?.wasClean)) {
             return
           }
 
-          if ('JsonPatch' in msg) {
-            const patches: Operation[] = msg.JsonPatch
-            const filtered = deduplicatePatches
-              ? deduplicatePatches(patches)
-              : patches
-
-            const current = dataRef.current
-            if (!filtered.length || !current) return
-
-            // Use Immer for structural sharing - only modified parts get new references
-            const next = produce(current, (draft) => {
-              applyUpsertPatch(draft as object, filtered)
-            })
-
-            dataRef.current = next
-            setData(next)
+          if (!isSlashCommandsStream) {
+            retryAttemptsRef.current += 1
+            scheduleReconnect()
+          }
           }
 
-          // Handle Ready messages (initial data has been sent)
-          if ('Ready' in msg) {
-            setIsInitialized(true)
-            initializedRef.current = true
-          }
-
-          // Handle finished messages ({finished: true})
-          // Treat finished as terminal - do NOT reconnect
-          if ('finished' in msg) {
-            finishedRef.current = true
-            ws.close(1000, 'finished')
-            wsRef.current = null
-            setIsConnected(false)
-          }
-        } catch (err) {
-          console.error('[useJsonPatchWsStream] Failed to process message', {
-            error: err,
-            data: event.data,
-          })
-          setError('Failed to process stream update')
-        }
-      }
-
-      ws.onerror = () => {
-        if (isSlashCommandsStream) {
-          console.warn('[slash-debug][ws] error event')
-        }
-        if (isModelDiscoveryStream) {
-          console.warn('[model-discovery][ws] error event')
-        }
-        if (finishedRef.current || initializedRef.current) {
-          return
-        }
-        if (connectTimerRef.current) {
-          clearTimeout(connectTimerRef.current)
-          connectTimerRef.current = null
-        }
-        setError('Connection failed')
-      }
-
-      ws.onclose = (evt) => {
-        if (isSlashCommandsStream) {
-          console.info('[slash-debug][ws] close', {
-            code: evt?.code,
-            reason: evt?.reason,
-            wasClean: evt?.wasClean,
-            finished: finishedRef.current,
-          })
-        }
-        if (isModelDiscoveryStream) {
-          console.info('[model-discovery][ws] close', {
-            code: evt?.code,
-            reason: evt?.reason,
-            wasClean: evt?.wasClean,
-            finished: finishedRef.current,
-          })
-        }
-        if (connectTimerRef.current) {
-          clearTimeout(connectTimerRef.current)
-          connectTimerRef.current = null
-        }
-        setIsConnected(false)
-        wsRef.current = null
-
-        // Do not reconnect if we received a finished message or clean close
-        if (finishedRef.current || (evt?.code === 1000 && evt?.wasClean)) {
-          return
-        }
-
-        // Otherwise, reconnect on unexpected/error closures
-        if (!isSlashCommandsStream) {
-          retryAttemptsRef.current += 1
-          scheduleReconnect()
-        }
-      }
-
-      wsRef.current = ws
+          wsRef.current = ws
+        })()
+      }, 0)
     }
 
     return () => {
+      disposed = true
       if (isSlashCommandsStream) {
         console.info('[slash-debug][ws] cleanup')
       }
@@ -375,8 +430,7 @@ export const useJsonPatchWsStream = <T extends object>(
         ws.onerror = null
         ws.onclose = null
 
-        // Close regardless of state
-        ws.close()
+        closeSocket(ws)
         wsRef.current = null
       }
       if (retryTimerRef.current) {

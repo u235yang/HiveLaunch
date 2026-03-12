@@ -315,13 +315,10 @@
       "privacyDataControl": "You keep control of your code and data with explicit transport paths",
       "linksTitle": "Official Links",
       "githubLabel": "GitHub Repository",
-      "giteeLabel": "Gitee Repository",
-      "docsLabel": "Documentation",
       "websiteLabel": "Website",
       "starTitle": "Like HiveLaunch? Support the project",
       "starDescription": "A Star helps more developers discover the project and join the community.",
-      "starGithub": "Star on GitHub",
-      "starGitee": "Star on Gitee"
+      "starGithub": "Star on GitHub"
     },
     "worktreeSection": {
       "loadError": "Failed to load settings",

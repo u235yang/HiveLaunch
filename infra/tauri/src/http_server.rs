@@ -41,6 +41,7 @@ use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_ENGINE};
 use sha2::{Digest, Sha256};
 use std::net::SocketAddr;
 use std::path::{Path as StdPath, PathBuf};
+use std::str::FromStr;
 use std::sync::{Arc, LazyLock, RwLock as StdRwLock};
 use std::collections::HashMap;
 use std::{fs, io};
@@ -142,6 +143,7 @@ struct RemoteAccessStatusData {
     device_id: Option<String>,
     pairing_key: Option<String>,
     relay_url: Option<String>,
+    device_name: Option<String>,
     connection_state: String,
     last_error: Option<String>,
     paired_devices: Vec<RemotePairedDevice>,
@@ -162,6 +164,7 @@ struct RemoteAccessRuntime {
     device_id: Option<String>,
     pairing_key: Option<String>,
     relay_url: Option<String>,
+    device_name: Option<String>,
     connection_state: String,
     last_error: Option<String>,
 }
@@ -2042,10 +2045,14 @@ pub struct GetDiffStatsRequest {
 
 #[derive(serde::Deserialize)]
 pub struct CreateSessionRequest {
+    #[serde(alias = "workspaceId")]
     pub workspace_id: String,
     pub executor: Option<String>,
+    #[serde(alias = "workingDir")]
     pub working_dir: Option<String>,
     #[serde(rename = "model")]
+    #[serde(alias = "modelId")]
+    #[serde(alias = "model_id")]
     pub model_id: Option<String>,
 }
 
@@ -2211,6 +2218,7 @@ lazy_static::lazy_static! {
             device_id: None,
             pairing_key: None,
             relay_url: None,
+            device_name: None,
             connection_state: "disabled".to_string(),
             last_error: None,
         }));
@@ -5886,10 +5894,10 @@ async fn get_task_by_id(
 async fn create_task(
     State(state): State<HttpServerState>,
     Json(payload): Json<CreateTaskRequest>,
-) -> Result<Json<TaskResponse>, String> {
+) -> Result<Json<TaskResponse>, (StatusCode, String)> {
     let pool = get_db_pool_from_manager(&state.process_manager)
         .await
-        .ok_or("Database pool not available")?;
+        .ok_or((StatusCode::INTERNAL_SERVER_ERROR, "Database pool not available".to_string()))?;
 
     let task_id = payload.id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
     let now = chrono::Utc::now().timestamp();
@@ -5917,9 +5925,11 @@ async fn create_task(
     .bind(now)
     .execute(pool.as_ref())
     .await
-    .map_err(|e| format!("Failed to create task: {}", e))?;
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to create task: {}", e)))?;
 
-    upsert_task_images(pool.as_ref(), &task_id, &image_ids).await?;
+    upsert_task_images(pool.as_ref(), &task_id, &image_ids)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
 
     Ok(Json(TaskResponse {
         id: task_id,
@@ -6193,7 +6203,7 @@ pub struct WorkspaceResponse {
 #[serde(rename_all = "camelCase")]
 pub struct CreateTaskWorkspaceRequest {
     pub workspace_id: Option<String>,
-    pub branch: String,
+    pub branch: Option<String>,
     pub base_branch: Option<String>,
     pub agent_working_dir: Option<String>,
     pub setup_completed_at: Option<i64>,
@@ -6258,6 +6268,21 @@ async fn create_task_workspace(
     });
     let now = chrono::Utc::now().timestamp();
     let agent_cli = payload.agent_cli.unwrap_or_else(|| "OPENCODE".to_string());
+    let branch = payload
+        .branch
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .or_else(|| {
+            payload
+                .base_branch
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string)
+        })
+        .unwrap_or_else(|| "main".to_string());
 
     sqlx::query(
         "INSERT INTO workspaces (id, task_id, branch, base_branch, agent_working_dir, setup_completed_at, agent_cli, archived, pinned, created_at, updated_at)
@@ -6265,7 +6290,7 @@ async fn create_task_workspace(
     )
     .bind(&workspace_id)
     .bind(&task_id)
-    .bind(&payload.branch)
+    .bind(&branch)
     .bind(&payload.base_branch)
     .bind(&payload.agent_working_dir)
     .bind(payload.setup_completed_at)
@@ -6279,7 +6304,7 @@ async fn create_task_workspace(
     Ok(Json(WorkspaceResponse {
         id: workspace_id,
         task_id,
-        branch: payload.branch,
+        branch,
         base_branch: payload.base_branch,
         agent_working_dir: payload.agent_working_dir,
         setup_completed_at: payload.setup_completed_at.map(|ts| timestamp_to_iso(Some(ts))),
@@ -6417,10 +6442,24 @@ async fn refresh_agent_cache(
 
 // ============ Discovered Options WebSocket ============
 
+fn deserialize_base_coding_agent<'de, D>(de: D) -> Result<bee_executor::BaseCodingAgent, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let raw = String::deserialize(de)?;
+    let normalized = raw.replace('-', "_").to_ascii_uppercase();
+    bee_executor::BaseCodingAgent::from_str(&normalized).map_err(|_| {
+        serde::de::Error::custom(format!(
+            "unknown executor '{raw}' (normalized to '{normalized}')"
+        ))
+    })
+}
+
 /// Discovered options WebSocket 查询参数
 #[derive(Debug, Deserialize)]
 #[allow(dead_code)]
 pub struct SlashCommandsQuery {
+    #[serde(deserialize_with = "deserialize_base_coding_agent")]
     executor: bee_executor::BaseCodingAgent,
     #[serde(default)]
     workspace_id: Option<String>,
@@ -7924,6 +7963,7 @@ async fn init_remote_access_tables(pool: &SqlitePool) -> Result<(), String> {
             pairing_key TEXT,
             pairing_key_hash TEXT,
             relay_url TEXT,
+            device_name TEXT,
             updated_at INTEGER NOT NULL
         )
         "#,
@@ -7932,6 +7972,9 @@ async fn init_remote_access_tables(pool: &SqlitePool) -> Result<(), String> {
     .await
     .map_err(|e| format!("Failed to create remote_access_settings: {}", e))?;
     let _ = sqlx::query("ALTER TABLE remote_access_settings ADD COLUMN pairing_key TEXT")
+        .execute(pool)
+        .await;
+    let _ = sqlx::query("ALTER TABLE remote_access_settings ADD COLUMN device_name TEXT")
         .execute(pool)
         .await;
     sqlx::query(
@@ -7953,6 +7996,13 @@ async fn init_remote_access_tables(pool: &SqlitePool) -> Result<(), String> {
 
 fn generate_pairing_key() -> String {
     format!("{:06}", uuid::Uuid::new_v4().as_u128() % 1_000_000)
+}
+
+fn get_hostname() -> String {
+    hostname::get()
+        .ok()
+        .and_then(|h| h.into_string().ok())
+        .unwrap_or_else(|| "Bee Desktop".to_string())
 }
 
 fn default_relay_ws_url() -> String {
@@ -8445,7 +8495,8 @@ async fn enable_remote_access(
     let relay_url = payload.relay_url.unwrap_or_else(default_relay_ws_url);
     let device_name = payload
         .device_name
-        .unwrap_or_else(|| "Bee Desktop".to_string());
+        .filter(|n| !n.trim().is_empty())
+        .unwrap_or_else(get_hostname);
     let device_id = uuid::Uuid::new_v4().to_string();
     let pairing_key = generate_pairing_key();
     let pairing_key_hash = format!("{:x}", Sha256::digest(pairing_key.as_bytes()));
@@ -8453,14 +8504,15 @@ async fn enable_remote_access(
         init_remote_access_tables(pool.as_ref()).await?;
         sqlx::query(
             r#"
-            INSERT INTO remote_access_settings (id, enabled, device_id, pairing_key, pairing_key_hash, relay_url, updated_at)
-            VALUES (1, 1, $1, $2, $3, $4, $5)
+            INSERT INTO remote_access_settings (id, enabled, device_id, pairing_key, pairing_key_hash, relay_url, device_name, updated_at)
+            VALUES (1, 1, $1, $2, $3, $4, $5, $6)
             ON CONFLICT(id) DO UPDATE SET
                 enabled = excluded.enabled,
                 device_id = excluded.device_id,
                 pairing_key = excluded.pairing_key,
                 pairing_key_hash = excluded.pairing_key_hash,
                 relay_url = excluded.relay_url,
+                device_name = excluded.device_name,
                 updated_at = excluded.updated_at
             "#,
         )
@@ -8468,6 +8520,7 @@ async fn enable_remote_access(
         .bind(&pairing_key)
         .bind(&pairing_key_hash)
         .bind(&relay_url)
+        .bind(&device_name)
         .bind(chrono::Utc::now().timestamp())
         .execute(pool.as_ref())
         .await
@@ -8479,6 +8532,7 @@ async fn enable_remote_access(
         runtime.device_id = Some(device_id.clone());
         runtime.pairing_key = Some(pairing_key.clone());
         runtime.relay_url = Some(relay_url.clone());
+        runtime.device_name = Some(device_name.clone());
         runtime.connection_state = "connecting".to_string();
         runtime.last_error = None;
     }
@@ -8539,8 +8593,16 @@ async fn get_remote_access_status(
 ) -> Result<Json<RemoteAccessStatusData>, String> {
     let runtime = REMOTE_ACCESS_RUNTIME.read().await.clone();
     let mut paired_devices = Vec::new();
+    let mut device_name_from_db: Option<String> = None;
     if let Some(pool) = get_db_pool_from_manager(&state.process_manager).await {
         init_remote_access_tables(pool.as_ref()).await?;
+        // Get device_name from database
+        if let Ok(Some(row)) = sqlx::query("SELECT device_name FROM remote_access_settings WHERE id = 1")
+            .fetch_optional(pool.as_ref())
+            .await
+        {
+            device_name_from_db = row.try_get("device_name").ok();
+        }
         let rows = sqlx::query(
             r#"
             SELECT device_id, device_name, paired_at, last_seen
@@ -8567,6 +8629,7 @@ async fn get_remote_access_status(
         device_id: runtime.device_id,
         pairing_key: runtime.pairing_key,
         relay_url: runtime.relay_url,
+        device_name: device_name_from_db,
         connection_state: runtime.connection_state,
         last_error: runtime.last_error,
         paired_devices,
@@ -8588,6 +8651,56 @@ async fn remove_remote_access_paired_device(
     Ok(Json(SimpleSuccessResponse { success: true }))
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct UpdateDeviceNameRequest {
+    device_name: String,
+}
+
+async fn update_remote_access_device_name(
+    State(state): State<HttpServerState>,
+    Json(payload): Json<UpdateDeviceNameRequest>,
+) -> Result<Json<SimpleSuccessResponse>, String> {
+    let device_name = payload
+        .device_name
+        .trim()
+        .to_string();
+    if device_name.is_empty() {
+        return Err("Device name cannot be empty".to_string());
+    }
+    // Update runtime
+    {
+        let mut runtime = REMOTE_ACCESS_RUNTIME.write().await;
+        runtime.device_name = Some(device_name.clone());
+    }
+    // Update database
+    if let Some(pool) = get_db_pool_from_manager(&state.process_manager).await {
+        init_remote_access_tables(pool.as_ref()).await?;
+        sqlx::query(
+            r#"
+            UPDATE remote_access_settings
+            SET device_name = $1, updated_at = $2
+            WHERE id = 1
+            "#,
+        )
+        .bind(&device_name)
+        .bind(chrono::Utc::now().timestamp())
+        .execute(pool.as_ref())
+        .await
+        .map_err(|e| format!("Failed to update device name: {}", e))?;
+    }
+    // Reconnect to relay with new device name if enabled
+    let runtime = REMOTE_ACCESS_RUNTIME.read().await.clone();
+    if runtime.enabled {
+        if let (Some(device_id), Some(pairing_key), Some(relay_url)) = 
+            (runtime.device_id.clone(), runtime.pairing_key.clone(), runtime.relay_url.clone()) {
+            drop(runtime);
+            spawn_remote_access_task(device_id, pairing_key, relay_url, device_name).await;
+        }
+    }
+    Ok(Json(SimpleSuccessResponse { success: true }))
+}
+
 async fn regenerate_remote_access_key(
     State(state): State<HttpServerState>,
 ) -> Result<Json<EnableRemoteAccessResponse>, String> {
@@ -8597,22 +8710,29 @@ async fn regenerate_remote_access_key(
         .clone()
         .ok_or_else(|| "Remote access not enabled".to_string())?;
     let relay_url = runtime.relay_url.clone().unwrap_or_else(default_relay_ws_url);
+    // Preserve existing device_name or use hostname
+    let device_name = runtime
+        .device_name
+        .clone()
+        .unwrap_or_else(get_hostname);
     let pairing_key = generate_pairing_key();
     let pairing_key_hash = format!("{:x}", Sha256::digest(pairing_key.as_bytes()));
     runtime.pairing_key = Some(pairing_key.clone());
+    runtime.device_name = Some(device_name.clone());
     drop(runtime);
     if let Some(pool) = get_db_pool_from_manager(&state.process_manager).await {
         init_remote_access_tables(pool.as_ref()).await?;
         sqlx::query(
             r#"
-            INSERT INTO remote_access_settings (id, enabled, device_id, pairing_key, pairing_key_hash, relay_url, updated_at)
-            VALUES (1, 1, $1, $2, $3, $4, $5)
+            INSERT INTO remote_access_settings (id, enabled, device_id, pairing_key, pairing_key_hash, relay_url, device_name, updated_at)
+            VALUES (1, 1, $1, $2, $3, $4, $5, $6)
             ON CONFLICT(id) DO UPDATE SET
                 enabled = excluded.enabled,
                 device_id = excluded.device_id,
                 pairing_key = excluded.pairing_key,
                 pairing_key_hash = excluded.pairing_key_hash,
                 relay_url = excluded.relay_url,
+                device_name = excluded.device_name,
                 updated_at = excluded.updated_at
             "#,
         )
@@ -8620,6 +8740,7 @@ async fn regenerate_remote_access_key(
         .bind(&pairing_key)
         .bind(&pairing_key_hash)
         .bind(&relay_url)
+        .bind(&device_name)
         .bind(chrono::Utc::now().timestamp())
         .execute(pool.as_ref())
         .await
@@ -8629,7 +8750,7 @@ async fn regenerate_remote_access_key(
         device_id.clone(),
         pairing_key.clone(),
         relay_url.clone(),
-        "Bee Desktop".to_string(),
+        device_name,
     )
     .await;
     let qr_payload = format!(
@@ -8652,7 +8773,7 @@ async fn restore_remote_access_runtime(
     init_remote_access_tables(pool.as_ref()).await?;
     let row = sqlx::query(
         r#"
-        SELECT enabled, device_id, pairing_key, relay_url
+        SELECT enabled, device_id, pairing_key, relay_url, device_name
         FROM remote_access_settings
         WHERE id = 1
         "#,
@@ -8667,12 +8788,14 @@ async fn restore_remote_access_runtime(
     let device_id: Option<String> = row.try_get("device_id").ok();
     let pairing_key: Option<String> = row.try_get("pairing_key").ok();
     let relay_url: Option<String> = row.try_get("relay_url").ok();
+    let device_name: Option<String> = row.try_get("device_name").ok();
     {
         let mut runtime = REMOTE_ACCESS_RUNTIME.write().await;
         runtime.enabled = enabled;
         runtime.device_id = device_id.clone();
         runtime.pairing_key = pairing_key.clone();
         runtime.relay_url = relay_url.clone();
+        runtime.device_name = device_name.clone();
         runtime.last_error = None;
         runtime.connection_state = if enabled {
             "connecting".to_string()
@@ -8682,7 +8805,9 @@ async fn restore_remote_access_runtime(
     }
     if enabled {
         if let (Some(device_id), Some(pairing_key), Some(relay_url)) = (device_id, pairing_key, relay_url) {
-            spawn_remote_access_task(device_id, pairing_key, relay_url, "Bee Desktop".to_string()).await;
+            // Use stored device_name or fallback to hostname
+            let name = device_name.unwrap_or_else(get_hostname);
+            spawn_remote_access_task(device_id, pairing_key, relay_url, name).await;
         }
     }
     Ok(())
@@ -8798,6 +8923,7 @@ fn create_router(state: HttpServerState) -> Router {
         .route("/api/remote-access/enable", post(enable_remote_access))
         .route("/api/remote-access/disable", post(disable_remote_access))
         .route("/api/remote-access/status", get(get_remote_access_status))
+        .route("/api/remote-access/device-name", post(update_remote_access_device_name))
         .route("/api/remote-access/paired/:device_id", delete(remove_remote_access_paired_device))
         .route("/api/remote-access/regenerate-key", post(regenerate_remote_access_key))
         .with_state(state)

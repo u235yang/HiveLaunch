@@ -14,6 +14,7 @@ export interface RemoteAccessStatus {
   deviceId: string | null
   pairingKey: string | null
   relayUrl: string | null
+  deviceName: string | null
   connectionState: string
   lastError: string | null
   pairedDevices: RemotePairedDevice[]
@@ -82,4 +83,8 @@ export async function regenerateRemoteAccessKey(): Promise<EnableRemoteAccessRes
 
 export async function removePairedDevice(deviceId: string): Promise<void> {
   await request(`/api/remote-access/paired/${encodeURIComponent(deviceId)}`, 'DELETE')
+}
+
+export async function updateDeviceName(deviceName: string): Promise<void> {
+  await request('/api/remote-access/device-name', 'POST', { deviceName })
 }

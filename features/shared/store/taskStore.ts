@@ -178,35 +178,100 @@ export const useTaskStore = create<TaskState>()(
         },
 
         createTask: async (data: CreateTaskInput) => {
-          console.log('[taskStore] createTask called with:', data)
           set({ isLoading: true, error: null }, false, 'createTask/pending')
+          const requestUrl = resolveHttpUrl(`/api/projects/${data.projectId}/tasks`)
+          const payloadPreview = {
+            projectId: data.projectId,
+            descriptionLength: data.description.length,
+            status: data.status,
+            agentCli: data.agentCli,
+            modelId: data.modelId,
+            taskType: data.taskType,
+            hasDirectBranch: Boolean(data.directBranch),
+            imageCount: data.imageIds?.length ?? 0,
+          }
+          console.warn('[taskStore] createTask_request', {
+            requestUrl,
+            payloadPreview,
+          })
           try {
-            const url = resolveHttpUrl(`/api/projects/${data.projectId}/tasks`)
-            console.log('[taskStore] Fetching:', url, 'with body:', JSON.stringify(data))
-            const response = await fetch(url, {
+            const response = await fetch(requestUrl, {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify(data),
             })
-            console.log('[taskStore] Response status:', response.status, 'ok:', response.ok)
+            console.warn('[taskStore] createTask_response', {
+              requestUrl,
+              status: response.status,
+              ok: response.ok,
+            })
             if (!response.ok) {
               const errorText = await response.text()
-              console.error('[taskStore] Error response:', errorText)
+              console.error('[taskStore] createTask_http_error', {
+                requestUrl,
+                status: response.status,
+                errorText,
+                payloadPreview,
+              })
               throw new Error('Failed to create task: ' + errorText)
             }
-            const task = await response.json()
-            console.log('[taskStore] Created task:', task)
-            set(
-              (state) => ({
-                tasks: [...state.tasks, task],
-                isLoading: false,
-              }),
-              false,
-              'createTask/fulfilled'
-            )
+            const responseText = await response.text()
+            console.warn('[taskStore] createTask_response_body', {
+              requestUrl,
+              responseTextPreview: responseText.slice(0, 500),
+            })
+            const responseContentType = response.headers.get('content-type') || ''
+            if (!responseContentType.toLowerCase().includes('application/json')) {
+              const nonJsonMessage = responseText.trim() || 'Failed to create task'
+              console.error('[taskStore] createTask_non_json_response', {
+                requestUrl,
+                contentType: responseContentType,
+                responseTextPreview: responseText.slice(0, 500),
+              })
+              throw new Error(nonJsonMessage)
+            }
+            let task: Task
+            try {
+              task = JSON.parse(responseText) as Task
+            } catch (error) {
+              const parseMessage = error instanceof Error ? error.message : String(error)
+              console.error('[taskStore] createTask_parse_error', {
+                requestUrl,
+                parseMessage,
+                responseTextPreview: responseText.slice(0, 500),
+              })
+              throw error
+            }
+            console.warn('[taskStore] createTask_success', {
+              requestUrl,
+              taskId: task?.id,
+            })
+            try {
+              set(
+                (state) => ({
+                  tasks: [...state.tasks, task],
+                  isLoading: false,
+                }),
+                false,
+                'createTask/fulfilled'
+              )
+            } catch (error) {
+              const setMessage = error instanceof Error ? error.message : String(error)
+              console.error('[taskStore] createTask_set_state_error', {
+                requestUrl,
+                taskId: task?.id,
+                setMessage,
+              })
+              throw error
+            }
             return task
           } catch (error) {
             const message = error instanceof Error ? error.message : 'Unknown error'
+            console.error('[taskStore] createTask_exception', {
+              requestUrl,
+              payloadPreview,
+              error: message,
+            })
             set({ error: message, isLoading: false }, false, 'createTask/rejected')
             throw error
           }

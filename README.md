@@ -13,8 +13,8 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/hivelaunch/hivelaunch/releases">
-    <img src="https://img.shields.io/github/v/release/hivelaunch/hivelaunch?include_prereleases&label=version" alt="Version">
+  <a href="https://github.com/MarcusYuan/HiveLaunch/releases">
+    <img src="https://img.shields.io/github/v/release/MarcusYuan/HiveLaunch?include_prereleases&label=version" alt="Version">
   </a>
   <a href="./LICENSE">
     <img src="https://img.shields.io/badge/license-Custom-blue" alt="License">
@@ -24,8 +24,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/hivelaunch/hivelaunch">GitHub</a> •
-  <a href="https://gitee.com/hivelaunch/hivelaunch">Gitee 镜像</a>
+  <a href="https://github.com/MarcusYuan/HiveLaunch">GitHub</a>
 </p>
 
 ---
@@ -164,7 +163,7 @@ HiveLaunch 是一个**本地优先**的 AI 开发平台，解决三类典型问�
 
 ### 方式 A：普通用户（桌面安装包）
 
-1. 打开 GitHub Releases：<https://github.com/hivelaunch/hivelaunch/releases>
+1. 打开 GitHub Releases：<https://github.com/MarcusYuan/HiveLaunch/releases>
 2. 根据系统下载对应安装包（macOS / Windows / Linux）
 3. 安装并启动 HiveLaunch
 4. 进入应用后按"首次使用流程"创建并运行任务
