@@ -144,14 +144,20 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - name: Build desktop bundle for Linux
         if: runner.os == 'Linux'
-        run: pnpm tauri build --config infra/tauri/tauri.conf.json --bundles deb,appimage
+        run: |
+          cd infra/tauri
+          pnpm tauri build --config tauri.conf.json --bundles deb,appimage
       - name: Build desktop bundle for macOS
         if: runner.os == 'macOS'
-        run: pnpm tauri build --config infra/tauri/tauri.conf.json --bundles dmg,app
+        run: |
+          cd infra/tauri
+          pnpm tauri build --config tauri.conf.json --bundles dmg,app
       - name: Build desktop bundle for Windows
         if: runner.os == 'Windows'
         shell: pwsh
-        run: pnpm tauri build --config infra/tauri/tauri.conf.json --bundles msi,nsis
+        run: |
+          Set-Location infra/tauri
+          pnpm tauri build --config tauri.conf.json --bundles msi,nsis
       - uses: actions/upload-artifact@v4
         with:
           name: desktop-${{ matrix.os }}-${{ needs.prepare.outputs.tag }}
