@@ -6627,6 +6627,12 @@ async fn handle_discovered_options_ws(
     let _ = socket
         .send(Message::Text(r#"{"finished":true}"#.to_string()))
         .await;
+    let _ = socket
+        .send(Message::Close(Some(axum::extract::ws::CloseFrame {
+            code: axum::extract::ws::close_code::NORMAL,
+            reason: "finished".into(),
+        })))
+        .await;
 }
 
 async fn execute_agent(

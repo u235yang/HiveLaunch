@@ -235,6 +235,8 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           path: artifacts
+      - name: Install zip
+        run: sudo apt-get update && sudo apt-get install -y zip
       - name: Prepare release assets
         run: |
           set -euo pipefail
@@ -292,7 +294,10 @@ jobs:
           if [[ -n "${IOS_MOBILE_IPA}" ]]; then
             cp "${IOS_MOBILE_IPA}" "release-assets/hivelaunch-mobile-ios-${TAG}.ipa"
           else
-            ditto -c -k --sequesterRsrc --keepParent "${IOS_MOBILE_XCARCHIVE}" "release-assets/hivelaunch-mobile-ios-dev-unsigned-${TAG}.xcarchive.zip"
+            XCARCHIVE_DIR="$(dirname "${IOS_MOBILE_XCARCHIVE}")"
+            XCARCHIVE_NAME="$(basename "${IOS_MOBILE_XCARCHIVE}")"
+            OUTPUT_ZIP="${GITHUB_WORKSPACE}/release-assets/hivelaunch-mobile-ios-dev-unsigned-${TAG}.xcarchive.zip"
+            (cd "${XCARCHIVE_DIR}" && zip -r "${OUTPUT_ZIP}" "${XCARCHIVE_NAME}")
           fi
 
           ls -la release-assets

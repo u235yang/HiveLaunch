@@ -15,11 +15,10 @@ val tauriProperties = Properties().apply {
 
 android {
     compileSdk = 36
-    buildToolsVersion = "36.1.0"
-    namespace = "com.bee_platform.mobile"
+    namespace = "com.hivelaunch.mobile"
     defaultConfig {
         manifestPlaceholders["usesCleartextTraffic"] = "false"
-        applicationId = "com.bee_platform.mobile"
+        applicationId = "com.hivelaunch.mobile"
         minSdk = 24
         targetSdk = 36
         versionCode = tauriProperties.getProperty("tauri.android.versionCode", "1").toInt()

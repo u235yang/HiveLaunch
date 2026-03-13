@@ -9,6 +9,8 @@
 - Desktop（Tauri）
 - Mobile（Android / iOS，已预置独立移动端工作流）
 
+> **Windows 平台开发**：gh CLI 安装认证、PowerShell 命令执行、Tauri 配置等，参见 [`windows-rules.md`](./windows-rules.md)。
+
 ## 2. 基础原则
 
 - 所有业务变更必须通过 Pull Request 合并到 `main`，禁止直接推送到 `main`。

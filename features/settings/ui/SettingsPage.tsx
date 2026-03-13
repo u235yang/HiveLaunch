@@ -154,6 +154,7 @@ export function SettingsPage() {
     scanNotSupported: t('remoteSection.scanNotSupported'),
     cameraInitFailed: t('remoteSection.cameraInitFailed'),
     scanFailed: t('remoteSection.scanFailed'),
+    cameraPermissionUnsupported: t('remoteSection.cameraPermissionUnsupported'),
     cameraPermissionDenied: t('remoteSection.cameraPermissionDenied'),
     cameraNotFound: t('remoteSection.cameraNotFound'),
     cameraUnavailable: t('remoteSection.cameraUnavailable'),

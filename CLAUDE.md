@@ -28,6 +28,7 @@
 | 问题类型 | 规则文件 |
 |---|---|
 | 技术栈版本、端口、跨端架构、传输一致性 | [`rules/tech-stack-rules.md`](./rules/tech-stack-rules.md) |
+| 移动端开发规范（API 调用统一、Tauri IPC 使用、传输层） | [`rules/mobile-rules.md`](./rules/mobile-rules.md) |
 | 目录边界、编码规范、i18n、主题配色、命名与禁用项 | [`rules/coding-rules.md`](./rules/coding-rules.md) |
 | PR 流程、分支策略、CI/CD 门禁、发布与回滚 | [`rules/ci-cd-rules.md`](./rules/ci-cd-rules.md) |
 | 远程访问故障、relay 认证错误、日志与排障路径 | [`rules/remote-access-rules.md`](./rules/remote-access-rules.md) |
@@ -65,6 +66,4 @@ pnpm typecheck
 - `docs/remote-access-highlevel.md`
 - `docs/remote-access-prd.md`
 - `docs/remote-access/technology-verification.md`
-- `docs/remote-access/server-admin-ui.md`
-- `docs/remote-access/_tracker.md`
-- `docs/troubleshooting.md`
+- `docs/remote-access/connection-modes.md`

@@ -420,6 +420,7 @@
       "scanNotSupported": "当前环境不支持摄像头扫码，请粘贴二维码内容",
       "cameraInitFailed": "摄像头初始化失败",
       "scanFailed": "扫码失败，请重试",
+      "cameraPermissionUnsupported": "当前环境不支持相机权限申请",
       "cameraPermissionDenied": "相机权限被拒绝，请在系统设置中允许相机权限",
       "cameraNotFound": "未检测到可用摄像头",
       "cameraUnavailable": "无法访问摄像头，请使用手动粘贴二维码内容",

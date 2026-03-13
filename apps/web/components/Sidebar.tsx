@@ -366,6 +366,7 @@ export default function Sidebar() {
     listMode === 'files' &&
     !!previewFilePath &&
     !!activeProject
+  const mobilePreviewTopOffset = 'calc(var(--top-nav-height, 2.5rem) + env(safe-area-inset-top))'
 
   // 收起时的宽度
   const width = sidebarCollapsed
@@ -633,13 +634,16 @@ export default function Sidebar() {
         <>
           {isMobile ? (
             <div
-              className="fixed inset-0 z-[60] bg-black/40"
+              className="fixed inset-x-0 bottom-0 z-[60] bg-black/40"
+              style={{ top: mobilePreviewTopOffset }}
               onClick={() => setPreviewFilePath(null)}
             />
           ) : null}
           <div
-            className="fixed inset-y-0 right-0 z-[70] flex min-h-0 overflow-hidden border-l border-border bg-card shadow-2xl"
-            style={{ width: isMobile ? '100vw' : 'min(65vw, 920px)' }}
+            className="fixed right-0 bottom-0 z-[70] flex min-h-0 overflow-hidden border-l border-border bg-card shadow-2xl"
+            style={isMobile
+              ? { width: '100vw', top: mobilePreviewTopOffset }
+              : { width: 'min(65vw, 920px)', top: 0 }}
           >
             <WorktreeFilePreviewPane
               worktreePath={activeProject.repoPath}

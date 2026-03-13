@@ -217,19 +217,74 @@ function sanitizeApiBase(value: string): string {
   return value.trim().replace(/\/$/, '')
 }
 
+function getBaseFallbackHost(): string {
+  if (isBrowser && window.location.hostname) {
+    return window.location.hostname
+  }
+  return '127.0.0.1'
+}
+
+function normalizeHostlessBase(value: string, protocol: 'http' | 'ws'): string {
+  const sanitized = sanitizeApiBase(value)
+  if (!sanitized) return ''
+
+  const fromPortOnly = sanitized.match(/^:(\d+)$/)
+  if (fromPortOnly) {
+    return `${protocol}://${getBaseFallbackHost()}:${fromPortOnly[1]}`
+  }
+
+  const fromMissingHost = sanitized.match(/^(https?|wss?):\/\/:(\d+)$/)
+  if (fromMissingHost) {
+    const normalizedProtocol = protocol === 'http' ? (fromMissingHost[1] === 'https' ? 'https' : 'http') : (fromMissingHost[1] === 'wss' ? 'wss' : 'ws')
+    return `${normalizedProtocol}://${getBaseFallbackHost()}:${fromMissingHost[2]}`
+  }
+
+  const fromHostPort = sanitized.match(/^([a-zA-Z0-9.-]+):(\d+)$/)
+  if (fromHostPort) {
+    return `${protocol}://${fromHostPort[1]}:${fromHostPort[2]}`
+  }
+
+  return ''
+}
+
+function ensureValidBaseUrl(value: string, expected: 'http' | 'ws'): string {
+  if (!value) return ''
+  try {
+    const url = new URL(value)
+    if (!url.hostname) return ''
+    if (expected === 'http' && !['http:', 'https:'].includes(url.protocol)) return ''
+    if (expected === 'ws' && !['ws:', 'wss:'].includes(url.protocol)) return ''
+    return url.toString().replace(/\/$/, '')
+  } catch {
+    return ''
+  }
+}
+
 function sanitizeHttpBase(value: string): string {
   const sanitized = sanitizeApiBase(value)
   if (!sanitized) return ''
-  if (/^https?:\/\//.test(sanitized)) return sanitized
+  if (/^https?:\/\//.test(sanitized)) {
+    return ensureValidBaseUrl(sanitized, 'http') || ensureValidBaseUrl(normalizeHostlessBase(sanitized, 'http'), 'http')
+  }
   if (/^wss?:\/\//.test(sanitized)) return toHttpBaseFromWs(sanitized)
+  const normalized = normalizeHostlessBase(sanitized, 'http')
+  if (normalized) return ensureValidBaseUrl(normalized, 'http')
   return ''
+}
+
+export function normalizeMobileDirectApiBase(value: string): string {
+  return sanitizeHttpBase(value)
 }
 
 function sanitizeWsBase(value: string): string {
   const sanitized = sanitizeApiBase(value)
   if (!sanitized) return ''
-  if (/^wss?:\/\//.test(sanitized)) return sanitized
+  if (/^wss?:\/\//.test(sanitized)) {
+    return ensureValidBaseUrl(sanitized, 'ws') || ensureValidBaseUrl(normalizeHostlessBase(sanitized, 'ws'), 'ws')
+  }
   if (/^https?:\/\//.test(sanitized)) return toWsBaseFromHttp(sanitized)
+  const normalized = normalizeHostlessBase(sanitized, 'ws')
+  if (normalized) return ensureValidBaseUrl(normalized, 'ws')
   return ''
 }
 
@@ -268,7 +323,15 @@ function getStoredMobileDirectApiBase(): string | null {
   if (!isBrowser) return null
   const value = window.localStorage.getItem(MOBILE_DIRECT_API_BASE_KEY)
   if (!value) return null
-  return sanitizeHttpBase(value) || null
+  const normalized = sanitizeHttpBase(value)
+  if (!normalized) {
+    window.localStorage.removeItem(MOBILE_DIRECT_API_BASE_KEY)
+    return null
+  }
+  if (normalized !== value) {
+    window.localStorage.setItem(MOBILE_DIRECT_API_BASE_KEY, normalized)
+  }
+  return normalized
 }
 
 function getStoredMobileRelaySettings():
@@ -1131,7 +1194,9 @@ function buildDefaultTransportBases(): { apiBase: string; realtimeBase: string }
   if (envApiBase || envWsBase) {
     const apiBase = sanitizeHttpBase(envApiBase || '') || toHttpBaseFromWs(envWsBase || '')
     const realtimeBase = sanitizeWsBase(envWsBase || '') || toWsBaseFromHttp(envApiBase || '')
-    return { apiBase, realtimeBase }
+    if (apiBase || realtimeBase) {
+      return { apiBase, realtimeBase }
+    }
   }
 
   if (isTauriDesktop()) {
@@ -1175,7 +1240,7 @@ export function getTransportSnapshot(): TransportSnapshot {
     const apiBase = toHttpBaseFromWs(relayRealtimeBase)
     const directApiBase =
       getStoredMobileDirectApiBase() ||
-      (process.env.NODE_ENV !== 'production' ? sanitizeApiBase(LAN_API_BASE) : '')
+      (process.env.NODE_ENV !== 'production' ? sanitizeHttpBase(LAN_API_BASE) : '')
     const realtimeBase = directApiBase ? toWsBaseFromHttp(directApiBase) : relayRealtimeBase
     const mode: TransportMode = 'relay'
     return {
@@ -1213,15 +1278,29 @@ export function subscribeTransportSnapshot(
 }
 
 function normalizeApiPath(path: string): string {
-  if (!path) return ''
-  if (/^https?:\/\//.test(path)) return path
-  return path.startsWith('/') ? path : `/${path}`
+  const sanitized = path.trim()
+  if (!sanitized) return ''
+  if (/^https?:\/\//.test(sanitized)) return sanitized
+  const normalized = sanitized.startsWith('/') ? sanitized : `/${sanitized}`
+  const stripped = normalized.replace(/^\/:\d+(?=\/|$)/, '')
+  return stripped || '/'
 }
 
 function normalizeRealtimePath(path: string): string {
-  if (!path) return ''
-  if (/^wss?:\/\//.test(path)) return path
-  return path.startsWith('/') ? path : `/${path}`
+  const sanitized = path.trim()
+  if (!sanitized) return ''
+  if (/^wss?:\/\//.test(sanitized)) return sanitized
+  const normalized = sanitized.startsWith('/') ? sanitized : `/${sanitized}`
+  const stripped = normalized.replace(/^\/:\d+(?=\/|$)/, '')
+  return stripped || '/'
+}
+
+function joinWithBase(path: string, base: string): string {
+  try {
+    return new URL(path, base).toString().replace(/\/$/, '')
+  } catch {
+    return ''
+  }
 }
 
 export function resolveHttpUrl(path: string): string {
@@ -1260,7 +1339,17 @@ export function resolveHttpUrl(path: string): string {
         envWsBase,
       })
     }
-    return `${normalizedApiBase}${normalizedPath}`
+    const safeBase = ensureValidBaseUrl(normalizedApiBase, 'http')
+    if (safeBase) {
+      const resolved = joinWithBase(normalizedPath, safeBase)
+      if (resolved) {
+        return resolved
+      }
+    }
+    if (isTauriEnvironment()) {
+      return `http://127.0.0.1:${TAURI_PORT}${normalizedPath}`
+    }
+    return normalizedPath
   }
 }
 
@@ -1278,7 +1367,17 @@ export function resolveRealtimeUrl(path: string): string {
   try {
     return new URL(normalizedPath, normalizedRealtimeBase).toString().replace(/\/$/, '')
   } catch {
-    return `${normalizedRealtimeBase}${normalizedPath}`
+    const safeBase = ensureValidBaseUrl(normalizedRealtimeBase, 'ws')
+    if (safeBase) {
+      const resolved = joinWithBase(normalizedPath, safeBase)
+      if (resolved) {
+        return resolved
+      }
+    }
+    if (isTauriEnvironment()) {
+      return `${browserWsProtocol}://127.0.0.1:${TAURI_PORT}${normalizedPath}`
+    }
+    return normalizedPath
   }
 }
 
@@ -1297,7 +1396,7 @@ export function setMobileConnectionMode(mode: MobileConnectionMode): void {
 export function getMobileDirectApiBase(): string {
   const saved = getStoredMobileDirectApiBase()
   if (saved) return saved
-  return sanitizeHttpBase(LAN_API_BASE)
+  return sanitizeHttpBase(LAN_API_BASE) || getDefaultLanApiBase()
 }
 
 export function setMobileDirectApiBase(value: string): void {

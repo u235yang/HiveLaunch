@@ -1,9 +1,10 @@
 'use client'
 
 import { useCallback, useEffect, useMemo, useState } from 'react'
-import { ChevronDown, ChevronRight, FileText, Folder, Loader2, Search, X } from 'lucide-react'
+import { ArrowLeft, ChevronDown, ChevronRight, FileText, Folder, Loader2, Search, X } from 'lucide-react'
 import { Virtuoso } from 'react-virtuoso'
 import { useUIStore } from '@/features/shared/store'
+import { useMobile } from '@/hooks/use-mobile'
 import { useWorktreeFilePreview, useWorktreeFiles } from '../hooks/useWorktreeFiles'
 import { listWorktreeFiles, type WorktreeFileEntry } from '../lib/git-operations'
 import { formatWorktreePreviewContent, isMarkdownPreview } from '../lib/worktree-preview'
@@ -349,6 +350,8 @@ interface WorktreeFilePreviewPaneProps {
 export function WorktreeFilePreviewPane({ worktreePath, filePath, onClose, className }: WorktreeFilePreviewPaneProps) {
   const locale = useUIStore((state) => state.locale)
   const txt = (zh: string, en: string) => (locale === 'en-US' ? en : zh)
+  const isMobile = useMobile()
+  const showMobileBackButton = isMobile && !!onClose
   const previewQuery = useWorktreeFilePreview(worktreePath, filePath, 400_000)
   const preview = previewQuery.data
   const previewContent = preview ? formatWorktreePreviewContent(preview) : ''
@@ -356,10 +359,28 @@ export function WorktreeFilePreviewPane({ worktreePath, filePath, onClose, class
 
   return (
     <div className={`flex-1 min-h-0 min-w-0 flex flex-col ${className ?? ''}`}>
-      <div className="h-12 shrink-0 px-4 border-b border-border flex items-center justify-between gap-3">
-        <span className="text-sm text-muted-foreground truncate">
-          {filePath ?? txt('选择文件查看预览', 'Select a file to preview')}
-        </span>
+      <div
+        className="h-12 shrink-0 px-4 border-b border-border flex items-center justify-between gap-3"
+        style={showMobileBackButton ? {
+          paddingTop: 'max(0.5rem, env(safe-area-inset-top))',
+          minHeight: 'calc(3rem + env(safe-area-inset-top))',
+        } : undefined}
+      >
+        {showMobileBackButton ? (
+          <button
+            type="button"
+            onClick={onClose}
+            className="inline-flex max-w-full items-center gap-1 rounded-md px-2 py-1 text-sm text-foreground hover:bg-muted/70"
+            aria-label={txt('返回文件列表', 'Back to file list')}
+          >
+            <ArrowLeft className="h-4 w-4 shrink-0" />
+            <span className="truncate">{txt('返回文件列表', 'Back to file list')}</span>
+          </button>
+        ) : (
+          <span className="text-sm text-muted-foreground truncate">
+            {filePath ?? txt('选择文件查看预览', 'Select a file to preview')}
+          </span>
+        )}
         {onClose ? (
           <button
             type="button"

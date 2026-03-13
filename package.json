@@ -9,7 +9,7 @@
     "dev:web": "pnpm --filter @hivelaunch/web dev",
     "dev:relay-admin": "pnpm --filter @hivelaunch/relay-admin dev",
     "dev:rust": "cd infra/tauri && cargo run --bin http-server",
-    "dev:desktop": "pnpm tauri dev --config infra/tauri/tauri.conf.json",
+    "dev:desktop": "node -e \"const { spawn } = require('node:child_process'); const child = spawn('pnpm tauri dev --config infra/tauri/tauri.conf.json', { stdio: 'inherit', shell: true, env: { ...process.env, TAURI_APP_PATH: 'infra/tauri' } }); child.on('exit', (code) => process.exit(code ?? 0));\"",
     "build": "pnpm --filter @hivelaunch/web build",
     "build:relay-admin": "pnpm --filter @hivelaunch/relay-admin build",
     "build:tauri": "pnpm tauri build",

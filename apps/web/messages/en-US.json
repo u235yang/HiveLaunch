@@ -420,6 +420,7 @@
       "scanNotSupported": "Camera scanning is not supported in current environment, paste QR content manually",
       "cameraInitFailed": "Camera initialization failed",
       "scanFailed": "Scan failed, please retry",
+      "cameraPermissionUnsupported": "Current environment does not support camera permission request",
       "cameraPermissionDenied": "Camera permission denied, allow camera access in system settings",
       "cameraNotFound": "No available camera detected",
       "cameraUnavailable": "Cannot access camera, please paste QR content manually",

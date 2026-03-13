@@ -6,6 +6,20 @@ const extraDevOrigins = process.env.NEXT_PUBLIC_DEV_ORIGINS
   : []
 const isTauriStaticBuild = process.env.TAURI_STATIC_EXPORT === '1'
 const withNextIntl = createNextIntlPlugin('./i18n/request.ts')
+const fallbackApiBaseUrl = 'http://127.0.0.1:3847'
+
+function normalizeApiBaseUrl(value: string | undefined): string {
+  if (!value) return fallbackApiBaseUrl
+  const sanitized = value.trim().replace(/\/$/, '')
+  try {
+    const parsed = new URL(sanitized)
+    if (!parsed.hostname) return fallbackApiBaseUrl
+    if (!['http:', 'https:'].includes(parsed.protocol)) return fallbackApiBaseUrl
+    return parsed.toString().replace(/\/$/, '')
+  } catch {
+    return fallbackApiBaseUrl
+  }
+}
 
 const nextConfig: NextConfig = {
   ...(isTauriStaticBuild
@@ -38,7 +52,7 @@ const nextConfig: NextConfig = {
       return []
     }
 
-    const apiBaseUrl = process.env.NEXT_PUBLIC_API_BASE_URL || 'http://127.0.0.1:3847'
+    const apiBaseUrl = normalizeApiBaseUrl(process.env.NEXT_PUBLIC_API_BASE_URL)
 
     return [
       {
@@ -49,6 +63,16 @@ const nextConfig: NextConfig = {
   },
   async redirects() {
     return [
+      {
+        source: '/:malformed(\\:[0-9]+)',
+        destination: '/',
+        permanent: false,
+      },
+      {
+        source: '/:malformed(\\:[0-9]+)/:path*',
+        destination: '/:path*',
+        permanent: false,
+      },
       {
         source: '/projects/:id/board',
         destination: '/projects?id=:id&view=board',
