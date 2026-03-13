@@ -155,7 +155,19 @@ export const useTaskStore = create<TaskState>()(
             const response = await fetch(resolveHttpUrl(`/api/projects/${projectId}/tasks`))
             if (!response.ok) throw new Error('Failed to fetch tasks')
             const tasks = await response.json()
-            set({ tasks, isLoading: false }, false, 'fetchTasks/fulfilled')
+            // Transform snake_case to camelCase
+            const transformedTasks = (tasks as Record<string, unknown>[]).map((task) => ({
+              ...task,
+              agentCli: (task.agentCli || task.agent_cli),
+              agentId: (task.agentId || task.agent_id),
+              modelId: (task.modelId || task.model_id),
+              taskType: (task.taskType || task.task_type),
+              directBranch: (task.directBranch || task.direct_branch),
+              projectId: (task.projectId || task.project_id),
+              createdAt: (task.createdAt || task.created_at),
+              updatedAt: (task.updatedAt || task.updated_at),
+            }))
+            set({ tasks: transformedTasks as Task[], isLoading: false }, false, 'fetchTasks/fulfilled')
           } catch (error) {
             const message = error instanceof Error ? error.message : 'Unknown error'
             set({ error: message, isLoading: false }, false, 'fetchTasks/rejected')
@@ -167,9 +179,21 @@ export const useTaskStore = create<TaskState>()(
           try {
             const response = await fetch(resolveHttpUrl(`/api/tasks/${id}`))
             if (!response.ok) throw new Error('Failed to fetch task')
-            const task = await response.json()
+            const task = (await response.json()) as Record<string, unknown>
+            // Transform snake_case to camelCase
+            const transformedTask = {
+              ...task,
+              agentCli: (task.agentCli || task.agent_cli),
+              agentId: (task.agentId || task.agent_id),
+              modelId: (task.modelId || task.model_id),
+              taskType: (task.taskType || task.task_type),
+              directBranch: (task.directBranch || task.direct_branch),
+              projectId: (task.projectId || task.project_id),
+              createdAt: (task.createdAt || task.created_at),
+              updatedAt: (task.updatedAt || task.updated_at),
+            }
             set({ isLoading: false }, false, 'fetchTaskById/fulfilled')
-            return task
+            return transformedTask as Task
           } catch (error) {
             const message = error instanceof Error ? error.message : 'Unknown error'
             set({ error: message, isLoading: false }, false, 'fetchTaskById/rejected')
@@ -242,14 +266,26 @@ export const useTaskStore = create<TaskState>()(
               })
               throw error
             }
+            // Transform snake_case to camelCase
+            const transformedTask = {
+              ...task,
+              agentCli: ((task as unknown as Record<string, unknown>).agentCli || (task as unknown as Record<string, unknown>).agent_cli) as unknown as Task['agentCli'],
+              agentId: (((task as unknown as Record<string, unknown>).agentId || (task as unknown as Record<string, unknown>).agent_id) as Task['agentId']),
+              modelId: (((task as unknown as Record<string, unknown>).modelId || (task as unknown as Record<string, unknown>).model_id) as Task['modelId']),
+              taskType: (((task as unknown as Record<string, unknown>).taskType || (task as unknown as Record<string, unknown>).task_type) as Task['taskType']),
+              directBranch: (((task as unknown as Record<string, unknown>).directBranch || (task as unknown as Record<string, unknown>).direct_branch) as Task['directBranch']),
+              projectId: (((task as unknown as Record<string, unknown>).projectId || (task as unknown as Record<string, unknown>).project_id) as Task['projectId']),
+              createdAt: (((task as unknown as Record<string, unknown>).createdAt || (task as unknown as Record<string, unknown>).created_at) as Task['createdAt']),
+              updatedAt: (((task as unknown as Record<string, unknown>).updatedAt || (task as unknown as Record<string, unknown>).updated_at) as Task['updatedAt']),
+            }
             console.warn('[taskStore] createTask_success', {
               requestUrl,
-              taskId: task?.id,
+              taskId: transformedTask?.id,
             })
             try {
               set(
                 (state) => ({
-                  tasks: [...state.tasks, task],
+                  tasks: [...state.tasks, transformedTask],
                   isLoading: false,
                 }),
                 false,
@@ -259,12 +295,12 @@ export const useTaskStore = create<TaskState>()(
               const setMessage = error instanceof Error ? error.message : String(error)
               console.error('[taskStore] createTask_set_state_error', {
                 requestUrl,
-                taskId: task?.id,
+                taskId: transformedTask?.id,
                 setMessage,
               })
               throw error
             }
-            return task
+            return transformedTask
           } catch (error) {
             const message = error instanceof Error ? error.message : 'Unknown error'
             console.error('[taskStore] createTask_exception', {
@@ -286,22 +322,39 @@ export const useTaskStore = create<TaskState>()(
               body: JSON.stringify(data),
             })
             if (!response.ok) throw new Error('Failed to update task')
-            const updatedTask = await response.json()
+            const rawTask = (await response.json()) as Record<string, unknown>
+            // Transform snake_case to camelCase - extract and rename fields
+            const transformedTask: Task = {
+              id: String(rawTask.id || id),
+              projectId: String(rawTask.projectId || rawTask.project_id || ''),
+              title: rawTask.title as Task['title'],
+              description: String(rawTask.description || ''),
+              status: String(rawTask.status || 'todo') as Task['status'],
+              position: rawTask.position as Task['position'],
+              agentCli: ((rawTask.agentCli || rawTask.agent_cli) as Task['agentCli']) || 'OPENCODE',
+              agentId: (rawTask.agentId || rawTask.agent_id) as Task['agentId'],
+              modelId: (rawTask.modelId || rawTask.model_id) as Task['modelId'],
+              taskType: ((rawTask.taskType || rawTask.task_type) as Task['taskType']) || 'normal',
+              directBranch: (rawTask.directBranch || rawTask.direct_branch) as Task['directBranch'],
+              imageIds: (rawTask.imageIds || rawTask.image_ids) as Task['imageIds'],
+              createdAt: String(rawTask.createdAt || rawTask.created_at || new Date().toISOString()),
+              updatedAt: String(rawTask.updatedAt || rawTask.updated_at || new Date().toISOString()),
+            }
             set(
               (state) => ({
                 tasks: state.tasks.map((t) =>
-                  t.id === id ? updatedTask : t
+                  t.id === id ? transformedTask : t
                 ),
                 currentTask:
                   state.currentTask?.id === id
-                    ? updatedTask
+                    ? transformedTask
                     : state.currentTask,
                 isLoading: false,
               }),
               false,
               'updateTask/fulfilled'
             )
-            return updatedTask
+            return transformedTask
           } catch (error) {
             const message = error instanceof Error ? error.message : 'Unknown error'
             set({ error: message, isLoading: false }, false, 'updateTask/rejected')

@@ -52,7 +52,7 @@ export interface UseTaskExecutionV2Return {
   error: Error | null
 
   // 操作
-  sendMessage: (message: string, variant?: string | null, imageIds?: string[]) => Promise<void>
+  sendMessage: (message: string, variant?: string | null, imageIds?: string[], modelIdOverride?: string) => Promise<void>
   stopExecution: () => Promise<void>
   restartExecution: () => Promise<void>
   startExecution: () => Promise<void>
@@ -427,13 +427,14 @@ export function useTaskExecutionV2({
 
   // 发送消息
   const sendMessage = useCallback(
-    async (message: string, variant: string | null = null, messageImageIds: string[] = []) => {
+    async (message: string, variant: string | null = null, messageImageIds: string[] = [], modelIdOverride?: string) => {
       if (!message.trim() && messageImageIds.length === 0) return
 
       try {
         setError(null)
 
         const imageIdsToSend = messageImageIds.length > 0 ? messageImageIds : (imageIds ?? [])
+        const effectiveModelId = modelIdOverride || modelId
 
         if (isFirstMessageRef.current) {
           // 首次发送：创建 session + 发送 prompt
@@ -486,7 +487,7 @@ export function useTaskExecutionV2({
             variant,
             executor: agentCli, // 🔹 保持使用 agentCli 作为 executor
             agentId, // 🔹 传递 agentId 作为额外配置
-            modelId,
+            modelId: effectiveModelId,
             imageIds: imageIdsToSend,
           })
 
@@ -501,7 +502,7 @@ export function useTaskExecutionV2({
             prompt: message,
             executorProfileId: { executor: agentCli, variant }, // 🔹 保持使用 agentCli
             agent: agentId, // 🔹 传递 agent 作为额外配置
-            model: modelId,
+            model: effectiveModelId,
             imageIds: imageIdsToSend,
             retryProcessId: null,
             forceWhenDirty: null,

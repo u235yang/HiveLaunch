@@ -14,15 +14,15 @@ import type { BaseCodingAgent, SendMessageShortcut } from '@shared/types'
 interface WysiwygFollowUpInputProps {
   isExecuting: boolean
   isConnected: boolean
-  agent: string | null  // 🔹 修改：支持任意字符串类型
+  agent: string | null // 🔹 修改：支持任意字符串类型
   workspaceId?: string
   selectedModelId?: string | null
   value?: string
   onValueChange?: (value: string) => void
-  onSend: (message: string, imageIds?: string[]) => Promise<void>
+  onSend: (message: string, imageIds?: string[], modelId?: string) => Promise<void> // 🔧 添加 modelId 参数
   onStop: () => Promise<void>
   onSave?: (message: string) => Promise<void> | void
-  onAgentChange?: (agentId: string) => void  // 🔹 修改：支持任意字符串类型
+  onAgentChange?: (agentId: string) => void // 🔹 修改：支持任意字符串类型
   onModelChange?: (modelId: string) => void
   sendShortcut?: SendMessageShortcut
   toolbarExtras?: ReactNode
@@ -216,7 +216,7 @@ export function WysiwygFollowUpInput({
     setIsSending(true)
 
     try {
-      await onSend(messageToSend, uploadedImages.map((img) => img.id))
+      await onSend(messageToSend, uploadedImages.map((img) => img.id), effectiveModelId || undefined)
       setMessage('')
       setUploadedImages([])
       setImageUploadError(null)
@@ -225,7 +225,7 @@ export function WysiwygFollowUpInput({
     } finally {
       setIsSending(false)
     }
-  }, [message, isExecuting, onSend, uploadedImages])
+  }, [message, isExecuting, onSend, uploadedImages, effectiveModelId])
 
   const handleStop = useCallback(async () => {
     try {

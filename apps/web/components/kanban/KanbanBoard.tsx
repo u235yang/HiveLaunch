@@ -382,12 +382,12 @@ export function KanbanBoard({ projectId }: KanbanBoardProps) {
   const handleStartExecutionRef = useRef(handleStartExecution)
   handleStartExecutionRef.current = handleStartExecution
 
-  const handleFollowUpSend = useCallback(async (message: string, messageImageIds?: string[]) => {
+  const handleFollowUpSend = useCallback(async (message: string, messageImageIds?: string[], modelId?: string) => {
     if (!activeTask) return
     const previousStatus = activeTask.status
     try {
       await ensureTaskInProgress(activeTask)
-      await taskExecution.sendMessage(message, null, messageImageIds)
+      await taskExecution.sendMessage(message, null, messageImageIds, modelId)
     } catch (error) {
       if (previousStatus !== 'inprogress') {
         await updateTask(activeTask.id, { status: previousStatus })
@@ -440,16 +440,14 @@ export function KanbanBoard({ projectId }: KanbanBoardProps) {
           const wsResponse = await fetch(`/api/tasks/${task.id}/workspaces`)
           console.log('[KanbanBoard] workspaces API:', wsResponse.status)
           if (!wsResponse.ok) {
-            console.log(`[KanbanBoard] Task ${task.id}: workspaces request failed, auto-fixing to todo`)
-            await updateTask(task.id, { status: 'todo' })
+            console.log(`[KanbanBoard] Task ${task.id}: workspaces request failed, keep inprogress`)
             continue
           }
           const workspaces = await wsResponse.json()
           console.log('[KanbanBoard] workspaces:', workspaces.length)
           if (cancelled) continue
           if (workspaces.length === 0) {
-            console.log(`[KanbanBoard] Task ${task.id}: no workspace, auto-fixing to todo`)
-            await updateTask(task.id, { status: 'todo' })
+            console.log(`[KanbanBoard] Task ${task.id}: no workspace, keep inprogress`)
             continue
           }
 
@@ -458,8 +456,7 @@ export function KanbanBoard({ projectId }: KanbanBoardProps) {
           const sessionsResponse = await fetch(`/api/workspaces/${latestWs.id}`)
           console.log('[KanbanBoard] workspace API:', sessionsResponse.status)
           if (!sessionsResponse.ok) {
-            console.log(`[KanbanBoard] Task ${task.id}: workspace not available, auto-fixing to todo`)
-            await updateTask(task.id, { status: 'todo' })
+            console.log(`[KanbanBoard] Task ${task.id}: workspace not available, keep inprogress`)
             continue
           }
           const wsData = await sessionsResponse.json()
@@ -469,9 +466,7 @@ export function KanbanBoard({ projectId }: KanbanBoardProps) {
           const hasSession = wsData.sessions && wsData.sessions.length > 0
           
           if (!hasSession) {
-            // 没有 session，自动标记为 pending
-            console.log(`[KanbanBoard] Task ${task.id}: no session, auto-fixing to pending`)
-            await updateTask(task.id, { status: 'pending' })
+            console.log(`[KanbanBoard] Task ${task.id}: no session, keep inprogress`)
             continue
           }
 
@@ -479,6 +474,7 @@ export function KanbanBoard({ projectId }: KanbanBoardProps) {
 
           // 策略2：尝试获取 processes，如果有错误（比如 404）也说明执行已结束
           let hasRunningProcess = false
+          let hasTerminalProcess = false
           try {
             const processesResponse = await fetch(
               `/api/sessions/${sessionId}/processes?show_soft_deleted=true`
@@ -497,20 +493,22 @@ export function KanbanBoard({ projectId }: KanbanBoardProps) {
                 (p: { run_reason: string; status: string }) =>
                   p.run_reason === 'codingagent' && p.status === 'running'
               )
-            } else if (processesResponse.status === 404) {
-              // API 不存在，说明执行已结束
-              console.log('[KanbanBoard] processes API 404, assuming completed')
-              hasRunningProcess = false
+              hasTerminalProcess = processes.some(
+                (p: { status: string }) =>
+                  p.status === 'completed' || p.status === 'failed' || p.status === 'killed'
+              )
+            } else {
+              console.log(`[KanbanBoard] Task ${task.id}: processes API unavailable, keep inprogress`)
+              continue
             }
           } catch (e) {
             console.log('[KanbanBoard] processes API error:', e)
-            hasRunningProcess = false
+            continue
           }
 
-          console.log('[KanbanBoard] hasRunningProcess:', hasRunningProcess)
+          console.log('[KanbanBoard] hasRunningProcess:', hasRunningProcess, 'hasTerminalProcess:', hasTerminalProcess)
 
-          // 如果没有 running 的进程，自动更新为 pending
-          if (!hasRunningProcess) {
+          if (!hasRunningProcess && hasTerminalProcess) {
             console.log(`[KanbanBoard] Auto-fixing task ${task.id}: inprogress -> pending`)
             await updateTask(task.id, { status: 'pending' })
           }
@@ -519,7 +517,6 @@ export function KanbanBoard({ projectId }: KanbanBoardProps) {
         }
       }
 
-      // 注意：不再调用 fetchTasks，让 task 更新后自动触发重新渲染
       isCheckingRef.current = false
     }
 
@@ -994,7 +991,7 @@ export function KanbanBoard({ projectId }: KanbanBoardProps) {
     })
   }, [activeTask, getTaskTitleFromDescription])
 
-  const handleTaskSend = useCallback(async (message: string, imageIds?: string[]) => {
+  const handleTaskSend = useCallback(async (message: string, imageIds?: string[], modelId?: string) => {
     if (!activeTask) return
     const draft = message.trim()
     if (!draft) return
@@ -1003,7 +1000,7 @@ export function KanbanBoard({ projectId }: KanbanBoardProps) {
       return
     }
     await persistTaskDraft(activeTask.id, draft)
-    await handleFollowUpSend(draft, imageIds)
+    await handleFollowUpSend(draft, imageIds, modelId)
   }, [activeTask, handleFollowUpSend, persistTaskDraft, projectSwarm?.swarm.cli, t])
 
   const handleTaskAgentChange = useCallback((nextAgent: string) => {
