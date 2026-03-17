@@ -54,6 +54,40 @@ const normalizeTaskAgentCli = (agentCli: string | undefined): BaseCodingAgent =>
   }
 }
 
+const LAST_MODEL_PREF_STORAGE_KEY = 'bee:kanban:last-model-pref:v1'
+
+const getModelPreferenceScopeKey = (projectId: string, executor: string): string =>
+  `${projectId}::${executor}`
+
+const readScopedModelPreference = (projectId: string, executor: string): string | null => {
+  if (typeof window === 'undefined') return null
+  try {
+    const raw = window.localStorage.getItem(LAST_MODEL_PREF_STORAGE_KEY)
+    if (!raw) return null
+    const parsed: unknown = JSON.parse(raw)
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return null
+    const scoped = (parsed as Record<string, unknown>)[getModelPreferenceScopeKey(projectId, executor)]
+    return typeof scoped === 'string' && scoped.trim() ? scoped : null
+  } catch {
+    return null
+  }
+}
+
+const writeScopedModelPreference = (projectId: string, executor: string, modelId: string): void => {
+  if (typeof window === 'undefined') return
+  if (!modelId.trim()) return
+  try {
+    const raw = window.localStorage.getItem(LAST_MODEL_PREF_STORAGE_KEY)
+    const parsed: Record<string, string> = raw
+      ? JSON.parse(raw) as Record<string, string>
+      : {}
+    parsed[getModelPreferenceScopeKey(projectId, executor)] = modelId
+    window.localStorage.setItem(LAST_MODEL_PREF_STORAGE_KEY, JSON.stringify(parsed))
+  } catch {
+    return
+  }
+}
+
 // ==================== Component ====================
 
 interface KanbanBoardProps {
@@ -155,6 +189,14 @@ export function KanbanBoard({ projectId }: KanbanBoardProps) {
     }
     return model.id
   }, [])
+  const findValidModel = useCallback((candidate: string | null | undefined) => {
+    if (!candidate || discovery.models.length === 0) return null
+    return discovery.models.find((model) =>
+      model.id === candidate ||
+      getFullModelId(model) === candidate ||
+      `${model.provider_id}/${model.id}` === candidate
+    ) ?? null
+  }, [discovery.models, getFullModelId])
   const availableAgents = useMemo(
     () =>
       discovery.agents.map((agent) => ({
@@ -215,16 +257,31 @@ export function KanbanBoard({ projectId }: KanbanBoardProps) {
   }, [activeProjectId])
 
   useEffect(() => {
-    if (!projectSwarm?.swarm.defaultModelId || discovery.models.length === 0) return
-    const validModel = discovery.models.find((model) =>
-      model.id === projectSwarm.swarm.defaultModelId ||
-      getFullModelId(model) === projectSwarm.swarm.defaultModelId ||
-      `${model.provider_id}/${model.id}` === projectSwarm.swarm.defaultModelId
-    )
-    if (validModel) {
-      setComposerModelId(getFullModelId(validModel))
+    if (!activeProjectId || !discoveryAgent || discovery.models.length === 0) return
+    const scopedStoredModel = readScopedModelPreference(activeProjectId, discoveryAgent)
+    const swarmModel = findValidModel(projectSwarm?.swarm.defaultModelId ?? null)
+    const discoveryModel = findValidModel(discovery.defaultModel ?? null)
+    const preferredModelId = scopedStoredModel
+      ? scopedStoredModel
+      : swarmModel
+        ? getFullModelId(swarmModel)
+        : discoveryModel
+          ? getFullModelId(discoveryModel)
+          : (discovery.models[0] ? getFullModelId(discovery.models[0]) : '')
+
+    if (preferredModelId && composerModelId !== preferredModelId) {
+      setComposerModelId(preferredModelId)
     }
-  }, [projectSwarm?.swarm.defaultModelId, discovery.models, getFullModelId])
+  }, [
+    activeProjectId,
+    composerModelId,
+    discovery.defaultModel,
+    discovery.models,
+    discoveryAgent,
+    findValidModel,
+    getFullModelId,
+    projectSwarm?.swarm.defaultModelId,
+  ])
 
   // 防止无限循环的标志
   const isCheckingRef = useRef(false)
@@ -1028,10 +1085,20 @@ export function KanbanBoard({ projectId }: KanbanBoardProps) {
       })
     }
     setActiveTask({ ...activeTask, modelId })
+    setComposerModelId(modelId)
+    if (activeProjectId && discoveryAgent) {
+      writeScopedModelPreference(activeProjectId, discoveryAgent, modelId)
+    }
     updateTask(activeTask.id, { modelId }).catch((error) => {
       console.error('Failed to update task model:', error)
     })
-  }, [activeTask, isMobile, selectedWorkspaceId, updateTask])
+  }, [activeProjectId, activeTask, discoveryAgent, isMobile, selectedWorkspaceId, updateTask])
+
+  const handleComposerModelChange = useCallback((modelId: string) => {
+    setComposerModelId(modelId)
+    if (!activeProjectId || !discoveryAgent) return
+    writeScopedModelPreference(activeProjectId, discoveryAgent, modelId)
+  }, [activeProjectId, discoveryAgent])
 
   const selectedWorkspaceFromList = useMemo(
     () => workspaces.find((workspace) => workspace.id === selectedWorkspaceId) ?? null,
@@ -1254,7 +1321,7 @@ export function KanbanBoard({ projectId }: KanbanBoardProps) {
               onSend={handleComposerSend}
               onStop={taskExecution.stopExecution}
               onAgentChange={setSelectedAgent}
-              onModelChange={setComposerModelId}
+              onModelChange={handleComposerModelChange}
               statusBarVisible={false}
               stopButtonVisible={false}
               toolbarExtras={

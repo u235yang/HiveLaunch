@@ -194,13 +194,27 @@ export function streamJsonPatchEntries<E = unknown>(
       socket.addEventListener('message', handleMessage)
       socket.addEventListener('error', (err) => {
         if (ws !== socket) return
-        console.error('[streamJsonPatchEntries] WebSocket error:', err)
+        if (terminal) return
+        if (socket.readyState === WebSocket.CLOSING || socket.readyState === WebSocket.CLOSED) return
+        console.warn('[streamJsonPatchEntries] WebSocket transient error event', {
+          type: err.type,
+          readyState: socket.readyState,
+          url: wsUrl,
+        })
         connected = false
       })
-      socket.addEventListener('close', () => {
+      socket.addEventListener('close', (rawEvent) => {
+        const event = rawEvent as CloseEvent
         if (ws !== socket) return
         ws = null
         connected = false
+        console.warn('[streamJsonPatchEntries] WebSocket close event', {
+          code: event.code,
+          reason: event.reason || null,
+          wasClean: event.wasClean,
+          readyState: socket.readyState,
+          url: wsUrl,
+        })
         if (terminal) {
           return
         }
@@ -213,7 +227,16 @@ export function streamJsonPatchEntries<E = unknown>(
           }, delay)
           return
         }
-        opts.onError?.(new Error('WebSocket closed before finished'))
+        const closeReason = event.reason?.trim()
+        if (closeReason) {
+          opts.onError?.(new Error(`WebSocket closed before finished: ${closeReason}`))
+          return
+        }
+        opts.onError?.(
+          new Error(
+            `WebSocket closed before finished (code: ${event.code}, clean: ${String(event.wasClean)})`
+          )
+        )
       })
     })()
   }

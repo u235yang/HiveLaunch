@@ -11,6 +11,7 @@ interface VibeThreadProps {
   isRunning?: boolean
   hasMore?: boolean
   onLoadMore?: () => void
+  scrollResetKey?: string
   className?: string
   emptyMessage?: string
 }
@@ -21,6 +22,7 @@ export function VibeThread({
   isRunning = false,
   hasMore = false,
   onLoadMore,
+  scrollResetKey,
   className,
   emptyMessage,
 }: VibeThreadProps) {
@@ -35,6 +37,7 @@ export function VibeThread({
       isRunning={isRunning}
       hasMore={hasMore}
       onLoadMore={onLoadMore}
+      scrollResetKey={scrollResetKey}
       renderItem={(entry, _index) => <NormalizedEntryRenderer entry={entry} />}
       className={className}
       emptyMessage={resolvedEmptyMessage}

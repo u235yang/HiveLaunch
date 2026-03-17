@@ -19,6 +19,7 @@ function ConversationEntries({ sessionId }: { sessionId: string }) {
             entries={entries}
             isLoading={isLoading}
             isRunning={isRunning}
+            scrollResetKey={sessionId}
             emptyMessage={txt('发送消息开始执行', 'Send a message to start execution')}
         />
     )
