@@ -12,6 +12,8 @@ export interface Task {
   status: TaskStatus
   hasInProgressAttempt?: boolean
   lastAttemptFailed?: boolean
+  lastAttemptSummary?: string
+  attemptCount?: number
   // Agent配置
   agentCli: string
   modelId?: string | null
@@ -79,6 +81,9 @@ export interface Session {
   id: string
   workspaceId: string
   agentProfile: AgentProfile
+  status: 'running' | 'inreview' | 'closed' | 'failed'
+  attemptNo: number
+  parentSessionId?: string | null
   createdAt: string
   updatedAt: string
 }

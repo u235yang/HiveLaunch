@@ -228,6 +228,10 @@ pub async fn init_db_pool(database_url: &str) -> Result<SqlitePool, sqlx::Error>
             agent_cli TEXT DEFAULT 'OPENCODE' NOT NULL,
             model_id TEXT,
             task_type TEXT DEFAULT 'normal' NOT NULL,
+            active_workspace_id TEXT,
+            active_session_id TEXT,
+            last_attempt_summary TEXT,
+            attempt_count INTEGER DEFAULT 0 NOT NULL,
             direct_branch TEXT,
             position INTEGER DEFAULT 0 NOT NULL,
             created_at INTEGER NOT NULL,
@@ -252,11 +256,69 @@ pub async fn init_db_pool(database_url: &str) -> Result<SqlitePool, sqlx::Error>
     .execute(&pool)
     .await?;
 
+    let task_columns = sqlx::query("PRAGMA table_info(tasks)")
+        .fetch_all(&pool)
+        .await?;
+    let has_active_workspace_id = task_columns.iter().any(|row| {
+        row.try_get::<String, _>("name")
+            .map(|column| column == "active_workspace_id")
+            .unwrap_or(false)
+    });
+    if !has_active_workspace_id {
+        sqlx::query("ALTER TABLE tasks ADD COLUMN active_workspace_id TEXT")
+            .execute(&pool)
+            .await?;
+    }
+    let has_active_session_id = task_columns.iter().any(|row| {
+        row.try_get::<String, _>("name")
+            .map(|column| column == "active_session_id")
+            .unwrap_or(false)
+    });
+    if !has_active_session_id {
+        sqlx::query("ALTER TABLE tasks ADD COLUMN active_session_id TEXT")
+            .execute(&pool)
+            .await?;
+    }
+    let has_last_attempt_summary = task_columns.iter().any(|row| {
+        row.try_get::<String, _>("name")
+            .map(|column| column == "last_attempt_summary")
+            .unwrap_or(false)
+    });
+    if !has_last_attempt_summary {
+        sqlx::query("ALTER TABLE tasks ADD COLUMN last_attempt_summary TEXT")
+            .execute(&pool)
+            .await?;
+    }
+    let has_attempt_count = task_columns.iter().any(|row| {
+        row.try_get::<String, _>("name")
+            .map(|column| column == "attempt_count")
+            .unwrap_or(false)
+    });
+    if !has_attempt_count {
+        sqlx::query("ALTER TABLE tasks ADD COLUMN attempt_count INTEGER DEFAULT 0 NOT NULL")
+            .execute(&pool)
+            .await?;
+    }
+    sqlx::query(
+        r#"CREATE INDEX IF NOT EXISTS idx_tasks_active_workspace_id
+           ON tasks(active_workspace_id)"#,
+    )
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        r#"CREATE INDEX IF NOT EXISTS idx_tasks_active_session_id
+           ON tasks(active_session_id)"#,
+    )
+    .execute(&pool)
+    .await?;
+
     sqlx::query(
         r#"CREATE TABLE IF NOT EXISTS workspaces (
             id TEXT PRIMARY KEY NOT NULL,
             task_id TEXT NOT NULL,
             branch TEXT NOT NULL,
+            role TEXT DEFAULT 'primary' NOT NULL,
+            source_workspace_id TEXT,
             base_branch TEXT,
             agent_working_dir TEXT,
             setup_completed_at INTEGER,
@@ -279,21 +341,122 @@ pub async fn init_db_pool(database_url: &str) -> Result<SqlitePool, sqlx::Error>
     .await?;
 
     sqlx::query(
+        r#"CREATE INDEX IF NOT EXISTS idx_workspaces_task_role
+           ON workspaces(task_id, role)"#,
+    )
+    .execute(&pool)
+    .await?;
+
+    let workspace_columns = sqlx::query("PRAGMA table_info(workspaces)")
+        .fetch_all(&pool)
+        .await?;
+    let has_role = workspace_columns.iter().any(|row| {
+        row.try_get::<String, _>("name")
+            .map(|column| column == "role")
+            .unwrap_or(false)
+    });
+    if !has_role {
+        sqlx::query("ALTER TABLE workspaces ADD COLUMN role TEXT DEFAULT 'primary' NOT NULL")
+            .execute(&pool)
+            .await?;
+    }
+    let has_source_workspace_id = workspace_columns.iter().any(|row| {
+        row.try_get::<String, _>("name")
+            .map(|column| column == "source_workspace_id")
+            .unwrap_or(false)
+    });
+    if !has_source_workspace_id {
+        sqlx::query("ALTER TABLE workspaces ADD COLUMN source_workspace_id TEXT")
+            .execute(&pool)
+            .await?;
+    }
+
+    sqlx::query(
         r#"CREATE TABLE IF NOT EXISTS sessions (
             id TEXT PRIMARY KEY NOT NULL,
             workspace_id TEXT NOT NULL,
             agent_cli TEXT DEFAULT 'OPENCODE' NOT NULL,
+            status TEXT DEFAULT 'running' NOT NULL,
+            attempt_no INTEGER DEFAULT 1 NOT NULL,
+            parent_session_id TEXT,
             created_at INTEGER NOT NULL,
             updated_at INTEGER NOT NULL,
-            FOREIGN KEY (workspace_id) REFERENCES workspaces(id) ON UPDATE no action ON DELETE cascade
+            FOREIGN KEY (workspace_id) REFERENCES workspaces(id) ON UPDATE no action ON DELETE cascade,
+            FOREIGN KEY (parent_session_id) REFERENCES sessions(id) ON UPDATE no action ON DELETE set null
+        )"#,
+    )
+    .execute(&pool)
+    .await?;
+
+    let session_columns = sqlx::query("PRAGMA table_info(sessions)")
+        .fetch_all(&pool)
+        .await?;
+    let has_session_status = session_columns.iter().any(|row| {
+        row.try_get::<String, _>("name")
+            .map(|column| column == "status")
+            .unwrap_or(false)
+    });
+    if !has_session_status {
+        sqlx::query("ALTER TABLE sessions ADD COLUMN status TEXT DEFAULT 'running' NOT NULL")
+            .execute(&pool)
+            .await?;
+    }
+    let has_attempt_no = session_columns.iter().any(|row| {
+        row.try_get::<String, _>("name")
+            .map(|column| column == "attempt_no")
+            .unwrap_or(false)
+    });
+    if !has_attempt_no {
+        sqlx::query("ALTER TABLE sessions ADD COLUMN attempt_no INTEGER DEFAULT 1 NOT NULL")
+            .execute(&pool)
+            .await?;
+    }
+    let has_parent_session_id = session_columns.iter().any(|row| {
+        row.try_get::<String, _>("name")
+            .map(|column| column == "parent_session_id")
+            .unwrap_or(false)
+    });
+    if !has_parent_session_id {
+        sqlx::query("ALTER TABLE sessions ADD COLUMN parent_session_id TEXT")
+            .execute(&pool)
+            .await?;
+    }
+
+    sqlx::query(
+        r#"CREATE INDEX IF NOT EXISTS idx_sessions_workspace_id
+           ON sessions(workspace_id)"#,
+    )
+    .execute(&pool)
+    .await?;
+
+    sqlx::query(
+        r#"CREATE INDEX IF NOT EXISTS idx_sessions_workspace_attempt
+           ON sessions(workspace_id, attempt_no DESC)"#,
+    )
+    .execute(&pool)
+    .await?;
+
+    sqlx::query(
+        r#"CREATE TABLE IF NOT EXISTS task_activity_logs (
+            id TEXT PRIMARY KEY NOT NULL,
+            task_id TEXT NOT NULL,
+            workspace_id TEXT,
+            session_id TEXT,
+            event_type TEXT NOT NULL,
+            summary TEXT NOT NULL,
+            metadata TEXT,
+            created_at INTEGER NOT NULL,
+            FOREIGN KEY (task_id) REFERENCES tasks(id) ON UPDATE no action ON DELETE cascade,
+            FOREIGN KEY (workspace_id) REFERENCES workspaces(id) ON UPDATE no action ON DELETE set null,
+            FOREIGN KEY (session_id) REFERENCES sessions(id) ON UPDATE no action ON DELETE set null
         )"#,
     )
     .execute(&pool)
     .await?;
 
     sqlx::query(
-        r#"CREATE INDEX IF NOT EXISTS idx_sessions_workspace_id
-           ON sessions(workspace_id)"#,
+        r#"CREATE INDEX IF NOT EXISTS idx_task_activity_logs_task_created
+           ON task_activity_logs(task_id, created_at DESC)"#,
     )
     .execute(&pool)
     .await?;

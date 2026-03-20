@@ -36,11 +36,17 @@ export interface ExecutionProcess {
  */
 export interface Session {
   id: string
-  workspaceId: string
+  workspaceId?: string
+  workspace_id: string
   executor: string | null
   workingDir?: string | null
-  createdAt: string
-  updatedAt: string
+  status: 'running' | 'inreview' | 'closed' | 'failed'
+  attempt_no: number
+  parent_session_id?: string | null
+  createdAt?: string
+  created_at: string
+  updatedAt?: string
+  updated_at: string
 }
 
 /**

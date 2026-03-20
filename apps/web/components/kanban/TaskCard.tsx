@@ -25,6 +25,10 @@ export interface Task {
   agentId?: string
   modelId?: string // 使用的模型
   taskType?: 'normal' | 'direct'
+  activeWorkspaceId?: string
+  activeSessionId?: string
+  lastAttemptSummary?: string
+  attemptCount?: number
   directBranch?: string
   imageIds?: string[]
   hasInProgressAttempt?: boolean

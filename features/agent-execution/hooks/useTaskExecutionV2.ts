@@ -7,6 +7,7 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { createWorkspace, WorkspaceInfo, WorkspaceConfig } from '../lib/workspace-creator'
+import { pickRecoverySession } from '../lib/session-recovery'
 import { useExecutionProcesses } from './useExecutionProcesses'
 import { useCreateSession } from './useCreateSession'
 import { sessionsApi, executionProcessesApi } from '@/features/agent-execution/api/sessions'
@@ -32,6 +33,9 @@ export interface UseTaskExecutionV2Options {
   setupScript?: string
   copyFiles?: string[]
   workspaceId?: string
+  activeSessionId?: string
+  workspaceRole?: 'primary' | 'retry' | 'fork'
+  sourceWorkspaceId?: string
   taskType?: 'normal' | 'direct'
   directBranch?: string
   imageIds?: string[]
@@ -55,6 +59,7 @@ export interface UseTaskExecutionV2Return {
   sendMessage: (message: string, variant?: string | null, imageIds?: string[], modelIdOverride?: string) => Promise<void>
   stopExecution: () => Promise<void>
   restartExecution: () => Promise<void>
+  prepareNewSessionInWorkspace: () => Promise<void>
   startExecution: () => Promise<void>
 }
 
@@ -62,7 +67,8 @@ export interface UseTaskExecutionV2Return {
 async function saveWorkspaceToDb(
   taskId: string,
   worktreeInfo: { id: string; branch: string; path: string; baseBranch?: string },
-  agentCli: string
+  agentCli: string,
+  options?: { role?: 'primary' | 'retry' | 'fork'; sourceWorkspaceId?: string }
 ): Promise<{ workspaceId: string } | null> {
   try {
     const normalizedWorkspaceId = (worktreeInfo.id || '').trim()
@@ -86,6 +92,8 @@ async function saveWorkspaceToDb(
         // 使用与 git worktree 相同的 ID，确保 Rust HTTP Server 能查到
         workspaceId: normalizedWorkspaceId || undefined,
         branch: normalizedBranch,
+        role: options?.role,
+        sourceWorkspaceId: options?.sourceWorkspaceId,
         baseBranch: worktreeInfo.baseBranch || null,
         agentWorkingDir: normalizedPath,
         agentCli,
@@ -141,6 +149,9 @@ export function useTaskExecutionV2({
   setupScript,
   copyFiles,
   workspaceId: initialWorkspaceId,
+  activeSessionId,
+  workspaceRole,
+  sourceWorkspaceId,
   taskType,
   directBranch,
   imageIds,
@@ -179,6 +190,32 @@ export function useTaskExecutionV2({
   // 使用 useCreateSession hook
   const { createSession, isCreating, error: createError } = useCreateSession()
 
+  const hydrateWorkspaceById = useCallback(async (workspaceId: string): Promise<WorkspaceInfo> => {
+    const wsResponse = await fetch(resolveHttpUrl(`/api/workspaces/${workspaceId}`))
+    if (!wsResponse.ok) {
+      throw new Error('Failed to fetch workspace details')
+    }
+    const wsData = await wsResponse.json() as Record<string, unknown>
+    return {
+      id: String(wsData.id || workspaceId),
+      branch: String(
+        wsData.branch ||
+        wsData.baseBranch ||
+        wsData.base_branch ||
+        'main'
+      ),
+      path: String(
+        wsData.agentWorkingDir ||
+        wsData.agent_working_dir ||
+        ''
+      ),
+      baseBranch: typeof wsData.baseBranch === 'string'
+        ? wsData.baseBranch
+        : (typeof wsData.base_branch === 'string' ? wsData.base_branch : undefined),
+      createdAt: String(wsData.createdAt || wsData.created_at || new Date().toISOString()),
+    }
+  }, [])
+
   // 当 execution processes 变化时检查是否完成
   useEffect(() => {
     if (!isAttemptRunning && executionProcesses.length > 0) {
@@ -203,6 +240,7 @@ export function useTaskExecutionV2({
     console.log('[useTaskExecutionV2] Workspace recovery effect:', {
       taskId,
       initialWorkspaceId,
+      activeSessionId,
     })
 
     if (!taskId || !initialWorkspaceId) {
@@ -215,38 +253,14 @@ export function useTaskExecutionV2({
     ;(async () => {
       try {
         console.log('[useTaskExecutionV2] Fetching workspace:', initialWorkspaceId)
-        // 获取 workspace 详情
-        const wsResponse = await fetch(resolveHttpUrl(`/api/workspaces/${initialWorkspaceId}`))
-        if (!wsResponse.ok) {
-          throw new Error('Failed to fetch workspace details')
-        }
-        const wsData = await wsResponse.json() as Record<string, unknown>
-
         if (cancelled) return
 
-        // 设置 workspace 信息（包含真实的 path 和 branch）
-        const existingWorkspace: WorkspaceInfo = {
-          id: String(wsData.id || initialWorkspaceId),
-          branch: String(
-            wsData.branch ||
-            wsData.baseBranch ||
-            wsData.base_branch ||
-            'main'
-          ),
-          path: String(
-            wsData.agentWorkingDir ||
-            wsData.agent_working_dir ||
-            ''
-          ),
-          baseBranch: typeof wsData.baseBranch === 'string'
-            ? wsData.baseBranch
-            : (typeof wsData.base_branch === 'string' ? wsData.base_branch : undefined),
-          createdAt: String(wsData.createdAt || wsData.created_at || new Date().toISOString()),
-        }
+        const existingWorkspace = await hydrateWorkspaceById(initialWorkspaceId)
+        if (cancelled) return
         workspaceRef.current = existingWorkspace
         setWorkspace(existingWorkspace)
 
-        // 获取 sessions
+        // 优先恢复 task 显式记录的 active session；若不存在，再回退到该 workspace 的最近 session。
         console.log('[useTaskExecutionV2] Fetching sessions for workspace:', initialWorkspaceId)
         const sessions = await sessionsApi.getByWorkspace(initialWorkspaceId)
         if (cancelled) return
@@ -254,20 +268,15 @@ export function useTaskExecutionV2({
         console.log('[useTaskExecutionV2] Found sessions:', sessions.length)
 
         if (sessions.length > 0) {
-          const latest = [...sessions].sort((a, b) => {
-            const getTs = (s: typeof a) => {
-              const anyS = s as unknown as Record<string, string | undefined>
-              const v =
-                anyS.updatedAt ??
-                anyS.updated_at ??
-                anyS.createdAt ??
-                anyS.created_at
-              return v ? new Date(v).getTime() : 0
-            }
-            return getTs(b) - getTs(a)
-          })[0]
-          console.log('[useTaskExecutionV2] Setting sessionId to:', latest.id)
-          setSessionId(latest.id)
+          const recoveredSession = pickRecoverySession(sessions, activeSessionId)
+          if (!recoveredSession) {
+            setSessionId(null)
+            isFirstMessageRef.current = true
+            setIsInitialized(true)
+            return
+          }
+          console.log('[useTaskExecutionV2] Setting sessionId to:', recoveredSession.id)
+          setSessionId(recoveredSession.id)
           isFirstMessageRef.current = false
         } else {
           // 没有 session，但 workspace 存在
@@ -293,7 +302,7 @@ export function useTaskExecutionV2({
     return () => {
       cancelled = true
     }
-  }, [initialWorkspaceId, onError, taskId])
+  }, [activeSessionId, hydrateWorkspaceById, initialWorkspaceId, onError, taskId])
 
   // 当 workspace 改变时清理状态 - 只有在 workspace 从有值变为空时才清理
   const prevWorkspaceRef = useRef(workspace)
@@ -346,7 +355,10 @@ export function useTaskExecutionV2({
         }
 
         // 保存到数据库
-        const dbWorkspace = await saveWorkspaceToDb(taskId, directWorkspace, agentCli)
+        const dbWorkspace = await saveWorkspaceToDb(taskId, directWorkspace, agentCli, {
+          role: workspaceRole || 'primary',
+          sourceWorkspaceId,
+        })
         if (!dbWorkspace) {
           throw new Error('Failed to save workspace to database')
         }
@@ -380,7 +392,10 @@ export function useTaskExecutionV2({
       const newWorkspace = await createWorkspace(config)
 
       // 保存到数据库，确保数据库中存储的 ID 与 worktree ID 一致
-      const dbWorkspace = await saveWorkspaceToDb(taskId, newWorkspace, agentCli)
+      const dbWorkspace = await saveWorkspaceToDb(taskId, newWorkspace, agentCli, {
+        role: workspaceRole || 'primary',
+        sourceWorkspaceId,
+      })
       if (!dbWorkspace) {
         throw new Error('Failed to save workspace to database')
       }
@@ -423,7 +438,7 @@ export function useTaskExecutionV2({
     } finally {
       setIsStarting(false)
     }
-  }, [taskId, repoPath, targetBranch, initialBranch, setupScript, copyFiles, agentCli, taskType, directBranch])
+  }, [taskId, repoPath, targetBranch, initialBranch, setupScript, copyFiles, agentCli, workspaceRole, sourceWorkspaceId, taskType, directBranch])
 
   // 发送消息
   const sendMessage = useCallback(
@@ -546,6 +561,25 @@ export function useTaskExecutionV2({
     resetRuntimeState()
   }, [resetRuntimeState])
 
+  const prepareNewSessionInWorkspace = useCallback(async () => {
+    const workspaceId = (workspaceRef.current?.id || initialWorkspaceIdRef.current || '').trim()
+    if (!workspaceId) {
+      throw new Error('No workspace available for retry session')
+    }
+
+    let existingWorkspace = workspaceRef.current
+    if (!existingWorkspace || existingWorkspace.id !== workspaceId) {
+      existingWorkspace = await hydrateWorkspaceById(workspaceId)
+    }
+
+    workspaceRef.current = existingWorkspace
+    setWorkspace(existingWorkspace)
+    setSessionId(null)
+    setIsInitialized(true)
+    setError(null)
+    isFirstMessageRef.current = true
+  }, [hydrateWorkspaceById])
+
   // 自动启动执行
   const autoStartExecution = useCallback(async () => {
     if (taskDescription) {
@@ -566,6 +600,7 @@ export function useTaskExecutionV2({
     sendMessage,
     stopExecution,
     restartExecution,
+    prepareNewSessionInWorkspace,
     startExecution: autoStartExecution,
   }
 }
