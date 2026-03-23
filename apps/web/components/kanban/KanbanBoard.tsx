@@ -18,7 +18,7 @@ import { ArrowLeft, CheckSquare, GitBranch, Layers3, Trash2, SquareArrowOutUpRig
 import { KanbanColumn } from './KanbanColumn'
 import { Task, TaskStatus, DragOverlayCard } from './TaskCard'
 import TaskDetailLayout from '@/features/kanban/ui/TaskDetailLayout'
-import TaskPanel, { WorkspaceInfo } from '@/features/kanban/ui/TaskDetailPanel/TaskPanel'
+import TaskPanel, { WorkspaceInfo, TaskActivityLogInfo } from '@/features/kanban/ui/TaskDetailPanel/TaskPanel'
 import AttemptPanel from '@/features/kanban/ui/TaskDetailPanel/AttemptPanel'
 import { useTaskExecutionV2 } from '@/features/agent-execution/hooks'
 import { WysiwygFollowUpInput, ConversationHistoryEntries, GitPanel, WorktreeFilePreviewPane } from '@/features/agent-execution/ui'
@@ -28,6 +28,7 @@ import { useExecutorDiscovery } from '@/features/agent-execution/hooks/useExecut
 import { useMobile } from '@/hooks/use-mobile'
 import { Tabs, TabsList, TabsTrigger, TabsContent, Switch } from '@shared/ui'
 import { cn } from '@/lib/utils'
+import { pickInitialWorkspaceId } from '@/features/kanban/lib/workspace-selection'
 import type { BaseCodingAgent } from '@shared/types'
 import type { BaseCodingAgent as ExecutionAgentCli } from '@/features/agent-execution/types/execution-process'
 
@@ -51,6 +52,40 @@ const normalizeTaskAgentCli = (agentCli: string | undefined): BaseCodingAgent =>
       return normalized
     default:
       return 'OPENCODE'
+  }
+}
+
+const LAST_MODEL_PREF_STORAGE_KEY = 'bee:kanban:last-model-pref:v1'
+
+const getModelPreferenceScopeKey = (projectId: string, executor: string): string =>
+  `${projectId}::${executor}`
+
+const readScopedModelPreference = (projectId: string, executor: string): string | null => {
+  if (typeof window === 'undefined') return null
+  try {
+    const raw = window.localStorage.getItem(LAST_MODEL_PREF_STORAGE_KEY)
+    if (!raw) return null
+    const parsed: unknown = JSON.parse(raw)
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return null
+    const scoped = (parsed as Record<string, unknown>)[getModelPreferenceScopeKey(projectId, executor)]
+    return typeof scoped === 'string' && scoped.trim() ? scoped : null
+  } catch {
+    return null
+  }
+}
+
+const writeScopedModelPreference = (projectId: string, executor: string, modelId: string): void => {
+  if (typeof window === 'undefined') return
+  if (!modelId.trim()) return
+  try {
+    const raw = window.localStorage.getItem(LAST_MODEL_PREF_STORAGE_KEY)
+    const parsed: Record<string, string> = raw
+      ? JSON.parse(raw) as Record<string, string>
+      : {}
+    parsed[getModelPreferenceScopeKey(projectId, executor)] = modelId
+    window.localStorage.setItem(LAST_MODEL_PREF_STORAGE_KEY, JSON.stringify(parsed))
+  } catch {
+    return
   }
 }
 
@@ -85,6 +120,11 @@ export function KanbanBoard({ projectId }: KanbanBoardProps) {
 
   // 真实数据状态 - 直接使用 workspaces 数据
   const [workspaces, setWorkspaces] = useState<WorkspaceInfo[]>([])
+  const [workspaceCreationIntent, setWorkspaceCreationIntent] = useState<{
+    role: 'primary' | 'retry' | 'fork'
+    sourceWorkspaceId?: string
+  } | null>(null)
+  const [activityLogs, setActivityLogs] = useState<TaskActivityLogInfo[]>([])
 
   // 选中的 workspace 详情（用于 GitPanel 和历史加载）
   const [selectedWorkspace, setSelectedWorkspace] = useState<{
@@ -155,6 +195,14 @@ export function KanbanBoard({ projectId }: KanbanBoardProps) {
     }
     return model.id
   }, [])
+  const findValidModel = useCallback((candidate: string | null | undefined) => {
+    if (!candidate || discovery.models.length === 0) return null
+    return discovery.models.find((model) =>
+      model.id === candidate ||
+      getFullModelId(model) === candidate ||
+      `${model.provider_id}/${model.id}` === candidate
+    ) ?? null
+  }, [discovery.models, getFullModelId])
   const availableAgents = useMemo(
     () =>
       discovery.agents.map((agent) => ({
@@ -215,16 +263,31 @@ export function KanbanBoard({ projectId }: KanbanBoardProps) {
   }, [activeProjectId])
 
   useEffect(() => {
-    if (!projectSwarm?.swarm.defaultModelId || discovery.models.length === 0) return
-    const validModel = discovery.models.find((model) =>
-      model.id === projectSwarm.swarm.defaultModelId ||
-      getFullModelId(model) === projectSwarm.swarm.defaultModelId ||
-      `${model.provider_id}/${model.id}` === projectSwarm.swarm.defaultModelId
-    )
-    if (validModel) {
-      setComposerModelId(getFullModelId(validModel))
+    if (!activeProjectId || !discoveryAgent || discovery.models.length === 0) return
+    const scopedStoredModel = readScopedModelPreference(activeProjectId, discoveryAgent)
+    const swarmModel = findValidModel(projectSwarm?.swarm.defaultModelId ?? null)
+    const discoveryModel = findValidModel(discovery.defaultModel ?? null)
+    const preferredModelId = scopedStoredModel
+      ? scopedStoredModel
+      : swarmModel
+        ? getFullModelId(swarmModel)
+        : discoveryModel
+          ? getFullModelId(discoveryModel)
+          : (discovery.models[0] ? getFullModelId(discovery.models[0]) : '')
+
+    if (preferredModelId && composerModelId !== preferredModelId) {
+      setComposerModelId(preferredModelId)
     }
-  }, [projectSwarm?.swarm.defaultModelId, discovery.models, getFullModelId])
+  }, [
+    activeProjectId,
+    composerModelId,
+    discovery.defaultModel,
+    discovery.models,
+    discoveryAgent,
+    findValidModel,
+    getFullModelId,
+    projectSwarm?.swarm.defaultModelId,
+  ])
 
   // 防止无限循环的标志
   const isCheckingRef = useRef(false)
@@ -288,6 +351,9 @@ export function KanbanBoard({ projectId }: KanbanBoardProps) {
     setupScript: (currentProject as { setupScript?: string } | null)?.setupScript,
     copyFiles: (currentProject as { copyFiles?: string[] } | null)?.copyFiles,
     workspaceId: selectedWorkspaceId, // 传入已选中的 workspace ID，用于连接 WebSocket
+    activeSessionId: activeTask?.activeSessionId,
+    workspaceRole: workspaceCreationIntent?.role,
+    sourceWorkspaceId: workspaceCreationIntent?.sourceWorkspaceId,
     taskType: activeTask?.taskType as 'normal' | 'direct' | undefined,  // 传递任务类型
     directBranch: activeTask?.directBranch,  // 传递直接任务的分支
     agentId: selectedAgent || undefined,
@@ -297,6 +363,37 @@ export function KanbanBoard({ projectId }: KanbanBoardProps) {
   // 保存 taskExecution.startExecution 的 ref，用于在 useEffect 中调用
   const taskExecutionRef = useRef(taskExecution)
   taskExecutionRef.current = taskExecution
+
+  useEffect(() => {
+    if (!taskExecution.workspace?.id) return
+    setWorkspaceCreationIntent(null)
+  }, [taskExecution.workspace?.id])
+
+  useEffect(() => {
+    if (!activeTask || !selectedWorkspaceId) return
+    if (activeTask.activeWorkspaceId === selectedWorkspaceId) return
+
+    updateTask(activeTask.id, {
+      activeWorkspaceId: selectedWorkspaceId,
+    }).catch((error) => {
+      console.error('[KanbanBoard] Failed to persist active workspace:', error)
+    })
+  }, [activeTask, selectedWorkspaceId, updateTask])
+
+  useEffect(() => {
+    if (!activeTask || !selectedWorkspaceId || !taskExecution.sessionId) return
+    if (taskExecution.workspace?.id !== selectedWorkspaceId) return
+    if (activeTask.activeWorkspaceId === selectedWorkspaceId && activeTask.activeSessionId === taskExecution.sessionId) {
+      return
+    }
+
+    updateTask(activeTask.id, {
+      activeWorkspaceId: selectedWorkspaceId,
+      activeSessionId: taskExecution.sessionId,
+    }).catch((error) => {
+      console.error('[KanbanBoard] Failed to persist active session:', error)
+    })
+  }, [activeTask, selectedWorkspaceId, taskExecution.sessionId, taskExecution.workspace?.id, updateTask])
 
   // 备用检查：当 handleExecutionComplete 没有被触发时（比如页面刷新后 sessionId 丢失）
   // 检查 executionProcesses 状态，如果都已完成但 task 仍是 inprogress，则更新 task 状态
@@ -451,9 +548,12 @@ export function KanbanBoard({ projectId }: KanbanBoardProps) {
             continue
           }
 
-          // 获取最新的 workspace 的 sessions
-          const latestWs = workspaces[0]
-          const sessionsResponse = await fetch(`/api/workspaces/${latestWs.id}`)
+          // 优先检查 task 显式记录的主 workspace；缺失时才回退到首个 workspace。
+          const preferredWorkspace = task.activeWorkspaceId
+            ? workspaces.find((workspace: { id: string }) => workspace.id === task.activeWorkspaceId)
+            : null
+          const workspaceForCheck = preferredWorkspace ?? workspaces[0]
+          const sessionsResponse = await fetch(`/api/workspaces/${workspaceForCheck.id}`)
           console.log('[KanbanBoard] workspace API:', sessionsResponse.status)
           if (!sessionsResponse.ok) {
             console.log(`[KanbanBoard] Task ${task.id}: workspace not available, keep inprogress`)
@@ -565,6 +665,7 @@ export function KanbanBoard({ projectId }: KanbanBoardProps) {
   useEffect(() => {
     if (!activeTask) {
       setWorkspaces([])
+      setActivityLogs([])
       setSelectedWorkspaceId(undefined)
       setSelectedWorkspace(null)
       return
@@ -591,6 +692,9 @@ export function KanbanBoard({ projectId }: KanbanBoardProps) {
             id: string
             taskId: string
             branch: string
+            role?: 'primary' | 'retry' | 'fork'
+            sourceWorkspaceId?: string | null
+            source_workspace_id?: string | null
             agentWorkingDir: string | null
             archived: boolean
             pinned: boolean
@@ -600,6 +704,8 @@ export function KanbanBoard({ projectId }: KanbanBoardProps) {
             id: ws.id,
             taskId: ws.taskId,
             branch: ws.branch,
+            role: ws.role,
+            sourceWorkspaceId: ws.sourceWorkspaceId ?? ws.source_workspace_id ?? null,
             agentWorkingDir: ws.agentWorkingDir,
             archived: ws.archived,
             pinned: ws.pinned,
@@ -610,10 +716,14 @@ export function KanbanBoard({ projectId }: KanbanBoardProps) {
 
           setWorkspaces(workspaceInfos)
 
-          // 默认选中第一个 workspace
-          if (workspaceInfos.length > 0) {
-            console.log('[KanbanBoard] Auto-selecting first workspace:', workspaceInfos[0].id)
-            setSelectedWorkspaceId(workspaceInfos[0].id)
+          const nextWorkspaceId = pickInitialWorkspaceId(
+            workspaceInfos,
+            activeTask.activeWorkspaceId
+          )
+
+          if (nextWorkspaceId) {
+            console.log('[KanbanBoard] Restoring workspace:', nextWorkspaceId)
+            setSelectedWorkspaceId(nextWorkspaceId)
           } else {
             console.log('[KanbanBoard] No workspaces found for task:', currentTaskId)
           }
@@ -629,7 +739,52 @@ export function KanbanBoard({ projectId }: KanbanBoardProps) {
     return () => {
       cancelled = true
     }
-  }, [activeTask?.id])
+  }, [activeTask?.activeWorkspaceId, activeTask?.id])
+
+  useEffect(() => {
+    if (!activeTask) {
+      setActivityLogs([])
+      return
+    }
+
+    let cancelled = false
+    const fetchActivityLogs = async () => {
+      try {
+        const response = await fetch(resolveHttpUrl(`/api/tasks/${activeTask.id}/activity-logs`))
+        if (!response.ok) {
+          throw new Error('Failed to fetch activity logs')
+        }
+        const result = await response.json() as {
+          data?: Array<Record<string, unknown>>
+        }
+        if (cancelled) return
+        const logs = Array.isArray(result.data) ? result.data : []
+        setActivityLogs(logs.map((log) => ({
+          id: String(log.id || ''),
+          taskId: String(log.taskId || log.task_id || activeTask.id),
+          workspaceId: typeof (log.workspaceId || log.workspace_id) === 'string'
+            ? String(log.workspaceId || log.workspace_id)
+            : undefined,
+          sessionId: typeof (log.sessionId || log.session_id) === 'string'
+            ? String(log.sessionId || log.session_id)
+            : undefined,
+          eventType: String(log.eventType || log.event_type || ''),
+          summary: String(log.summary || ''),
+          metadata: typeof log.metadata === 'string' ? log.metadata : null,
+          createdAt: String(log.createdAt || log.created_at || new Date().toISOString()),
+        })))
+      } catch (error) {
+        if (cancelled) return
+        console.error('[KanbanBoard] Failed to fetch activity logs:', error)
+        setActivityLogs([])
+      }
+    }
+
+    void fetchActivityLogs()
+    return () => {
+      cancelled = true
+    }
+  }, [activeTask?.id, taskExecution.sessionId, taskExecution.workspace?.id, activeTask?.updatedAt])
 
   // 当选中 workspace 改变时，获取 workspace 详情
   useEffect(() => {
@@ -676,6 +831,8 @@ export function KanbanBoard({ projectId }: KanbanBoardProps) {
         id: newWorkspace.id,
         taskId: activeTask?.id || '',
         branch: newWorkspace.branch,
+        role: workspaceCreationIntent?.role || 'primary',
+        sourceWorkspaceId: workspaceCreationIntent?.sourceWorkspaceId || null,
         agentWorkingDir: newWorkspace.path,
         archived: false,
         pinned: false,
@@ -693,7 +850,7 @@ export function KanbanBoard({ projectId }: KanbanBoardProps) {
       branch: newWorkspace.branch,
       agentWorkingDir: newWorkspace.path,
     })
-  }, [taskExecution.workspace?.id, activeTask?.id])
+  }, [taskExecution.workspace?.id, activeTask?.id, workspaceCreationIntent?.role, workspaceCreationIntent?.sourceWorkspaceId])
 
   // 拖拽传感器配置 - 添加触摸支持
   const sensors = useSensors(
@@ -1003,6 +1160,112 @@ export function KanbanBoard({ projectId }: KanbanBoardProps) {
     await handleFollowUpSend(draft, imageIds, modelId)
   }, [activeTask, handleFollowUpSend, persistTaskDraft, projectSwarm?.swarm.cli, t])
 
+  const handleResumeWorkspace = useCallback(async (workspaceId: string) => {
+    if (!activeTask) return
+    setSelectedWorkspaceId(workspaceId)
+    await taskExecution.prepareNewSessionInWorkspace()
+    await updateTask(activeTask.id, {
+      status: 'inprogress',
+      activeWorkspaceId: workspaceId,
+      activeSessionId: '',
+    })
+    setDetailDraftMessage('')
+  }, [activeTask, taskExecution, updateTask])
+
+  const handleCreateRetryWorkspace = useCallback(async (workspaceId: string) => {
+    if (!activeTask || !currentProject) return
+
+    const sourceWorkspace = workspaces.find((workspace) => workspace.id === workspaceId)
+    if (!sourceWorkspace) return
+
+    setInitialBranch(sourceWorkspace.branch)
+    setWorkspaceCreationIntent({
+      role: 'retry',
+      sourceWorkspaceId: workspaceId,
+    })
+    setSelectedWorkspaceId(undefined)
+    taskExecution.restartExecution()
+
+    const initialMessage = activeTask.description || t('startExecutionTask')
+
+    try {
+      await handleFollowUpSend(initialMessage)
+    } catch (error) {
+      console.error('Failed to create retry workspace:', error)
+    } finally {
+      setWorkspaceCreationIntent(null)
+    }
+  }, [activeTask, currentProject, handleFollowUpSend, taskExecution, t, workspaces])
+
+  const refreshTaskWorkspaces = useCallback(async (deletedWorkspaceIds: string[] = []) => {
+    if (!activeTask?.id) return
+
+    const wsResponse = await fetch(`/api/tasks/${activeTask.id}/workspaces`)
+    if (!wsResponse.ok) return
+
+    const workspaceList = await wsResponse.json()
+    const workspaceInfos: WorkspaceInfo[] = workspaceList.map((ws: {
+      id: string
+      taskId: string
+      branch: string
+      role?: 'primary' | 'retry' | 'fork'
+      sourceWorkspaceId?: string | null
+      source_workspace_id?: string | null
+      agentWorkingDir: string | null
+      agentCli: string
+      archived: boolean
+      pinned: boolean
+      createdAt: string
+      updatedAt: string
+    }) => ({
+      id: ws.id,
+      taskId: ws.taskId,
+      branch: ws.branch,
+      role: ws.role,
+      sourceWorkspaceId: ws.sourceWorkspaceId ?? ws.source_workspace_id ?? null,
+      agentWorkingDir: ws.agentWorkingDir,
+      agentCli: ws.agentCli,
+      archived: ws.archived,
+      pinned: ws.pinned,
+      createdAt: ws.createdAt,
+      updatedAt: ws.updatedAt,
+      status: ws.archived ? 'killed' : 'completed',
+    }))
+    setWorkspaces(workspaceInfos)
+
+    if (selectedWorkspaceId && deletedWorkspaceIds.includes(selectedWorkspaceId)) {
+      const nextActiveWorkspace = workspaceInfos.find((ws) => !ws.archived)
+      if (nextActiveWorkspace) {
+        setSelectedWorkspaceId(nextActiveWorkspace.id)
+      } else {
+        setSelectedWorkspaceId(undefined)
+        setSelectedWorkspace(null)
+      }
+    }
+  }, [activeTask?.id, selectedWorkspaceId])
+
+  const handleDeleteWorkspace = useCallback(async (workspaceId: string) => {
+    const response = await fetch(`/api/workspaces/${workspaceId}`, {
+      method: 'DELETE',
+    })
+    if (!response.ok) {
+      throw new Error('Failed to delete workspace')
+    }
+    await refreshTaskWorkspaces([workspaceId])
+  }, [refreshTaskWorkspaces])
+
+  const handleDeleteAllWorkspaces = useCallback(async (workspaceIds: string[]) => {
+    for (const workspaceId of workspaceIds) {
+      const response = await fetch(`/api/workspaces/${workspaceId}`, {
+        method: 'DELETE',
+      })
+      if (!response.ok) {
+        throw new Error(`Failed to delete workspace ${workspaceId}`)
+      }
+    }
+    await refreshTaskWorkspaces(workspaceIds)
+  }, [refreshTaskWorkspaces])
+
   const handleTaskAgentChange = useCallback((nextAgent: string) => {
     setSelectedAgent(nextAgent)
     if (!activeTask) return
@@ -1028,10 +1291,20 @@ export function KanbanBoard({ projectId }: KanbanBoardProps) {
       })
     }
     setActiveTask({ ...activeTask, modelId })
+    setComposerModelId(modelId)
+    if (activeProjectId && discoveryAgent) {
+      writeScopedModelPreference(activeProjectId, discoveryAgent, modelId)
+    }
     updateTask(activeTask.id, { modelId }).catch((error) => {
       console.error('Failed to update task model:', error)
     })
-  }, [activeTask, isMobile, selectedWorkspaceId, updateTask])
+  }, [activeProjectId, activeTask, discoveryAgent, isMobile, selectedWorkspaceId, updateTask])
+
+  const handleComposerModelChange = useCallback((modelId: string) => {
+    setComposerModelId(modelId)
+    if (!activeProjectId || !discoveryAgent) return
+    writeScopedModelPreference(activeProjectId, discoveryAgent, modelId)
+  }, [activeProjectId, discoveryAgent])
 
   const selectedWorkspaceFromList = useMemo(
     () => workspaces.find((workspace) => workspace.id === selectedWorkspaceId) ?? null,
@@ -1254,7 +1527,7 @@ export function KanbanBoard({ projectId }: KanbanBoardProps) {
               onSend={handleComposerSend}
               onStop={taskExecution.stopExecution}
               onAgentChange={setSelectedAgent}
-              onModelChange={setComposerModelId}
+              onModelChange={handleComposerModelChange}
               statusBarVisible={false}
               stopButtonVisible={false}
               toolbarExtras={
@@ -1378,6 +1651,7 @@ export function KanbanBoard({ projectId }: KanbanBoardProps) {
             <TaskPanel
               task={activeTask}
               workspaces={workspaces}
+              activityLogs={activityLogs}
               selectedWorkspaceId={selectedWorkspaceId}
               onSelectWorkspace={setSelectedWorkspaceId}
               locale={locale}
@@ -1385,10 +1659,18 @@ export function KanbanBoard({ projectId }: KanbanBoardProps) {
                 taskInfo: tTaskDetail('taskInfo'),
                 worktrees: tTaskDetail('worktrees'),
                 noWorktree: tTaskDetail('noWorktree'),
+                workspaceRoles: {
+                  primary: 'Primary',
+                  retry: 'Retry',
+                  fork: 'Fork',
+                },
+                workspaceSourcePrefix: 'Source',
                 workspaceNotConfigured: tTaskDetail('workspaceNotConfigured'),
                 deleteWorktree: tTaskDetail('deleteWorktree'),
                 deleteWorktreeConfirm: tTaskDetail('deleteWorktreeConfirm'),
                 createWorktree: tTaskDetail('createWorktree'),
+                createRetryWorkspace: 'Create Retry Worktree',
+                resumeWorkspace: 'Resume In Current Worktree',
                 attemptStatus: {
                   running: tTaskDetail('attemptStatus.running'),
                   completed: tTaskDetail('attemptStatus.completed'),
@@ -1414,11 +1696,19 @@ export function KanbanBoard({ projectId }: KanbanBoardProps) {
                   cancel: tTaskDetail('cancel'),
                 },
               }}
+              onResumeWorkspace={handleResumeWorkspace}
+              onCreateRetryWorkspace={handleCreateRetryWorkspace}
+              onDeleteAllWorkspaces={handleDeleteAllWorkspaces}
               onCreateWorkspace={async (baseBranch: string) => {
                 if (!activeTask || !currentProject) return
 
                 // 设置基准分支
                 setInitialBranch(baseBranch)
+                setWorkspaceCreationIntent({
+                  role: 'fork',
+                  sourceWorkspaceId: selectedWorkspaceId,
+                })
+                setSelectedWorkspaceId(undefined)
 
                 // 重置 taskExecution 状态，确保创建新的 workspace
                 taskExecution.restartExecution()
@@ -1435,55 +1725,13 @@ export function KanbanBoard({ projectId }: KanbanBoardProps) {
                   // 这样 GitPanel 能正确显示 workspace 信息
                 } catch (error) {
                   console.error('Failed to start execution:', error)
+                } finally {
+                  setWorkspaceCreationIntent(null)
                 }
               }}
               onDeleteWorkspace={async (workspaceId: string) => {
                 try {
-                  const response = await fetch(`/api/workspaces/${workspaceId}`, {
-                    method: 'DELETE',
-                  })
-                  if (!response.ok) {
-                    throw new Error('Failed to delete workspace')
-                  }
-
-                  // 刷新 workspaces 列表
-                  const wsResponse = await fetch(`/api/tasks/${activeTask?.id}/workspaces`)
-                  if (wsResponse.ok) {
-                    const workspaceList = await wsResponse.json()
-                    const workspaceInfos: WorkspaceInfo[] = workspaceList.map((ws: {
-                      id: string
-                      taskId: string
-                      branch: string
-                      agentWorkingDir: string | null
-                      agentCli: string
-                      archived: boolean
-                      pinned: boolean
-                      createdAt: string
-                      updatedAt: string
-                    }) => ({
-                      id: ws.id,
-                      taskId: ws.taskId,
-                      branch: ws.branch,
-                      agentWorkingDir: ws.agentWorkingDir,
-                      agentCli: ws.agentCli,
-                      archived: ws.archived,
-                      pinned: ws.pinned,
-                      createdAt: ws.createdAt,
-                      updatedAt: ws.updatedAt,
-                      status: ws.archived ? 'killed' : 'completed',
-                    }))
-                    setWorkspaces(workspaceInfos)
-
-                    // 如果删除的是当前选中的，选择其他 workspace
-                    if (workspaceId === selectedWorkspaceId) {
-                      if (workspaceInfos.length > 0) {
-                        setSelectedWorkspaceId(workspaceInfos[0].id)
-                      } else {
-                        setSelectedWorkspaceId(undefined)
-                        setSelectedWorkspace(null)
-                      }
-                    }
-                  }
+                  await handleDeleteWorkspace(workspaceId)
                 } catch (error) {
                   console.error('Failed to delete workspace:', error)
                   alert(t('deleteFailed', { message: error instanceof Error ? error.message : t('unknownError') }))

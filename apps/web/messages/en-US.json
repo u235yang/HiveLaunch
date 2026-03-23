@@ -138,7 +138,8 @@
     "startExecution": "Start execution",
     "startWithExistingWorktree": "Will start Agent with existing Worktree",
     "startWithNewWorktree": "Will create Worktree and start Agent with task description",
-    "starting": "Starting..."
+    "starting": "Starting...",
+    "modelPreferenceInvalidFallback": "Your previously selected model \"{modelId}\" is not available now. Automatically fell back to an available default model."
   },
   "createProject": {
     "nameRequired": "Project name is required.",

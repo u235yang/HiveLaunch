@@ -18,6 +18,10 @@ export interface Task {
   agentId?: string // 🔹 新增：用户选择的 agent ID
   modelId?: string // 使用的模型
   taskType: TaskType
+  activeWorkspaceId?: string
+  activeSessionId?: string
+  lastAttemptSummary?: string
+  attemptCount?: number
   directBranch?: string
   imageIds?: string[]
   position: number
@@ -38,13 +42,17 @@ export interface TaskSwarmConfig {
   maxIterations: number
 }
 
- export interface UpdateTaskInput {
+export interface UpdateTaskInput {
   title?: string | null
   description?: string
   status?: TaskStatus
   agentCli?: BaseCodingAgent
   agentId?: string // 🔹 添加 agentId
   modelId?: string
+  activeWorkspaceId?: string | null
+  activeSessionId?: string | null
+  lastAttemptSummary?: string | null
+  attemptCount?: number
   position?: number
   taskType?: TaskType
   directBranch?: string
@@ -162,6 +170,10 @@ export const useTaskStore = create<TaskState>()(
               agentId: (task.agentId || task.agent_id),
               modelId: (task.modelId || task.model_id),
               taskType: (task.taskType || task.task_type),
+              activeWorkspaceId: (task.activeWorkspaceId || task.active_workspace_id),
+              activeSessionId: (task.activeSessionId || task.active_session_id),
+              lastAttemptSummary: (task.lastAttemptSummary || task.last_attempt_summary),
+              attemptCount: Number(task.attemptCount || task.attempt_count || 0),
               directBranch: (task.directBranch || task.direct_branch),
               projectId: (task.projectId || task.project_id),
               createdAt: (task.createdAt || task.created_at),
@@ -187,6 +199,10 @@ export const useTaskStore = create<TaskState>()(
               agentId: (task.agentId || task.agent_id),
               modelId: (task.modelId || task.model_id),
               taskType: (task.taskType || task.task_type),
+              activeWorkspaceId: (task.activeWorkspaceId || task.active_workspace_id),
+              activeSessionId: (task.activeSessionId || task.active_session_id),
+              lastAttemptSummary: (task.lastAttemptSummary || task.last_attempt_summary),
+              attemptCount: Number(task.attemptCount || task.attempt_count || 0),
               directBranch: (task.directBranch || task.direct_branch),
               projectId: (task.projectId || task.project_id),
               createdAt: (task.createdAt || task.created_at),
@@ -273,6 +289,10 @@ export const useTaskStore = create<TaskState>()(
               agentId: (((task as unknown as Record<string, unknown>).agentId || (task as unknown as Record<string, unknown>).agent_id) as Task['agentId']),
               modelId: (((task as unknown as Record<string, unknown>).modelId || (task as unknown as Record<string, unknown>).model_id) as Task['modelId']),
               taskType: (((task as unknown as Record<string, unknown>).taskType || (task as unknown as Record<string, unknown>).task_type) as Task['taskType']),
+              activeWorkspaceId: (((task as unknown as Record<string, unknown>).activeWorkspaceId || (task as unknown as Record<string, unknown>).active_workspace_id) as Task['activeWorkspaceId']),
+              activeSessionId: (((task as unknown as Record<string, unknown>).activeSessionId || (task as unknown as Record<string, unknown>).active_session_id) as Task['activeSessionId']),
+              lastAttemptSummary: (((task as unknown as Record<string, unknown>).lastAttemptSummary || (task as unknown as Record<string, unknown>).last_attempt_summary) as Task['lastAttemptSummary']),
+              attemptCount: Number((task as unknown as Record<string, unknown>).attemptCount || (task as unknown as Record<string, unknown>).attempt_count || 0),
               directBranch: (((task as unknown as Record<string, unknown>).directBranch || (task as unknown as Record<string, unknown>).direct_branch) as Task['directBranch']),
               projectId: (((task as unknown as Record<string, unknown>).projectId || (task as unknown as Record<string, unknown>).project_id) as Task['projectId']),
               createdAt: (((task as unknown as Record<string, unknown>).createdAt || (task as unknown as Record<string, unknown>).created_at) as Task['createdAt']),
@@ -335,6 +355,10 @@ export const useTaskStore = create<TaskState>()(
               agentId: (rawTask.agentId || rawTask.agent_id) as Task['agentId'],
               modelId: (rawTask.modelId || rawTask.model_id) as Task['modelId'],
               taskType: ((rawTask.taskType || rawTask.task_type) as Task['taskType']) || 'normal',
+              activeWorkspaceId: (rawTask.activeWorkspaceId || rawTask.active_workspace_id) as Task['activeWorkspaceId'],
+              activeSessionId: (rawTask.activeSessionId || rawTask.active_session_id) as Task['activeSessionId'],
+              lastAttemptSummary: (rawTask.lastAttemptSummary || rawTask.last_attempt_summary) as Task['lastAttemptSummary'],
+              attemptCount: Number(rawTask.attemptCount || rawTask.attempt_count || 0),
               directBranch: (rawTask.directBranch || rawTask.direct_branch) as Task['directBranch'],
               imageIds: (rawTask.imageIds || rawTask.image_ids) as Task['imageIds'],
               createdAt: String(rawTask.createdAt || rawTask.created_at || new Date().toISOString()),

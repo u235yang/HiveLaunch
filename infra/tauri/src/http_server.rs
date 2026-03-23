@@ -103,6 +103,53 @@ fn summarize_patch_for_log(patch: &json_patch::Patch) -> String {
     }
 }
 
+fn resolve_relative_path(base: &StdPath, relative: &str) -> Result<PathBuf, String> {
+    let rel = relative.trim();
+    if rel.is_empty() {
+        return Err("Relative path cannot be empty".to_string());
+    }
+    let path = StdPath::new(rel);
+    if path.is_absolute() {
+        return Err(format!("Absolute path is not allowed: {}", rel));
+    }
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::Normal(part) => normalized.push(part),
+            std::path::Component::CurDir => {}
+            _ => return Err(format!("Invalid relative path: {}", rel)),
+        }
+    }
+    Ok(base.join(normalized))
+}
+
+fn copy_dir_recursive_local(src: &StdPath, dst: &StdPath) -> Result<(), String> {
+    if !dst.exists() {
+        fs::create_dir_all(dst)
+            .map_err(|e| format!("Failed to create directory {:?}: {}", dst, e))?;
+    }
+
+    for entry in fs::read_dir(src).map_err(|e| format!("Failed to read directory {:?}: {}", src, e))? {
+        let entry = entry.map_err(|e| format!("Failed to read entry: {}", e))?;
+        let ty = entry.file_type().map_err(|e| format!("Failed to get file type: {}", e))?;
+        let src_path = entry.path();
+        let dst_path = dst.join(entry.file_name());
+
+        if ty.is_dir() {
+            copy_dir_recursive_local(&src_path, &dst_path)?;
+        } else {
+            if let Some(parent) = dst_path.parent() {
+                fs::create_dir_all(parent)
+                    .map_err(|e| format!("Failed to create parent dir {:?}: {}", parent, e))?;
+            }
+            fs::copy(&src_path, &dst_path)
+                .map_err(|e| format!("Failed to copy {:?} to {:?}: {}", src_path, dst_path, e))?;
+        }
+    }
+
+    Ok(())
+}
+
 /// Generic API Response wrapper
 #[derive(serde::Serialize)]
 pub struct ApiResponse<T> {
@@ -524,6 +571,10 @@ pub struct UpdateTaskRequest {
     pub task_type: Option<String>,
     #[serde(rename = "directBranch")]
     pub direct_branch: Option<String>,
+    #[serde(rename = "activeWorkspaceId")]
+    pub active_workspace_id: Option<String>,
+    #[serde(rename = "activeSessionId")]
+    pub active_session_id: Option<String>,
     #[serde(rename = "imageIds")]
     pub image_ids: Option<Vec<String>>,
     pub position: Option<i32>,
@@ -543,6 +594,17 @@ pub struct TaskResponse {
     pub model_id: Option<String>,
     #[serde(rename = "taskType")]
     pub task_type: String,
+    #[serde(rename = "activeWorkspaceId")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub active_workspace_id: Option<String>,
+    #[serde(rename = "activeSessionId")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub active_session_id: Option<String>,
+    #[serde(rename = "lastAttemptSummary")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_attempt_summary: Option<String>,
+    #[serde(rename = "attemptCount")]
+    pub attempt_count: i64,
     #[serde(rename = "directBranch")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub direct_branch: Option<String>,
@@ -552,6 +614,18 @@ pub struct TaskResponse {
     pub position: i32,
     pub created_at: String,
     pub updated_at: String,
+}
+
+#[derive(serde::Serialize, Clone)]
+pub struct TaskActivityLogResponse {
+    pub id: String,
+    pub task_id: String,
+    pub workspace_id: Option<String>,
+    pub session_id: Option<String>,
+    pub event_type: String,
+    pub summary: String,
+    pub metadata: Option<String>,
+    pub created_at: String,
 }
 
 #[derive(serde::Deserialize)]
@@ -2029,6 +2103,19 @@ pub struct CreateWorkspaceRequest {
 }
 
 #[derive(serde::Deserialize)]
+pub struct CopyWorkspaceFilesRequest {
+    pub source_repo_path: String,
+    pub target_worktree_path: String,
+    pub files: Vec<String>,
+}
+
+#[derive(serde::Serialize)]
+pub struct CopyWorkspaceFilesResponse {
+    pub copied: Vec<String>,
+    pub skipped: Vec<String>,
+}
+
+#[derive(serde::Deserialize)]
 pub struct GetWorktreeStatusRequest {
     pub repo_path: String,
     pub worktree_path: String,
@@ -2054,6 +2141,290 @@ pub struct CreateSessionRequest {
     #[serde(alias = "modelId")]
     #[serde(alias = "model_id")]
     pub model_id: Option<String>,
+}
+
+async fn update_task_active_workspace(
+    pool: &SqlitePool,
+    task_id: &str,
+    workspace_id: &str,
+) -> Result<(), String> {
+    let now = chrono::Utc::now().timestamp();
+    sqlx::query(
+        "UPDATE tasks SET active_workspace_id = $1, updated_at = $2 WHERE id = $3"
+    )
+    .bind(workspace_id)
+    .bind(now)
+    .bind(task_id)
+    .execute(pool)
+    .await
+    .map_err(|e| format!("Failed to update active workspace for task {}: {}", task_id, e))?;
+    Ok(())
+}
+
+async fn update_task_active_session_by_workspace(
+    pool: &SqlitePool,
+    workspace_id: &str,
+    session_id: &str,
+) -> Result<(), String> {
+    let now = chrono::Utc::now().timestamp();
+    sqlx::query(
+        r#"UPDATE tasks
+           SET active_workspace_id = $1, active_session_id = $2, updated_at = $3
+           WHERE id = (SELECT task_id FROM workspaces WHERE id = $1 LIMIT 1)"#
+    )
+    .bind(workspace_id)
+    .bind(session_id)
+    .bind(now)
+    .execute(pool)
+    .await
+    .map_err(|e| format!("Failed to update active session for workspace {}: {}", workspace_id, e))?;
+    Ok(())
+}
+
+async fn update_task_attempt_tracking(
+    pool: &SqlitePool,
+    task_id: &str,
+    summary: Option<&str>,
+    attempt_count: Option<i64>,
+) -> Result<(), String> {
+    let now = chrono::Utc::now().timestamp();
+    sqlx::query(
+        r#"UPDATE tasks
+           SET last_attempt_summary = COALESCE($1, last_attempt_summary),
+               attempt_count = COALESCE($2, attempt_count),
+               updated_at = $3
+           WHERE id = $4"#,
+    )
+    .bind(summary)
+    .bind(attempt_count)
+    .bind(now)
+    .bind(task_id)
+    .execute(pool)
+    .await
+    .map_err(|e| format!("Failed to update task attempt tracking for task {}: {}", task_id, e))?;
+    Ok(())
+}
+
+async fn count_task_attempts(pool: &SqlitePool, task_id: &str) -> Result<i64, String> {
+    sqlx::query_scalar(
+        r#"SELECT COUNT(1)
+           FROM sessions s
+           INNER JOIN workspaces w ON w.id = s.workspace_id
+           WHERE w.task_id = $1"#,
+    )
+    .bind(task_id)
+    .fetch_one(pool)
+    .await
+    .map_err(|e| format!("Failed to count attempts for task {}: {}", task_id, e))
+}
+
+async fn insert_task_activity_log(
+    pool: &SqlitePool,
+    task_id: &str,
+    workspace_id: Option<&str>,
+    session_id: Option<&str>,
+    event_type: &str,
+    summary: &str,
+    metadata: Option<&str>,
+) -> Result<(), String> {
+    let now = chrono::Utc::now().timestamp();
+    sqlx::query(
+        r#"INSERT INTO task_activity_logs
+           (id, task_id, workspace_id, session_id, event_type, summary, metadata, created_at)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8)"#,
+    )
+    .bind(uuid::Uuid::new_v4().to_string())
+    .bind(task_id)
+    .bind(workspace_id)
+    .bind(session_id)
+    .bind(event_type)
+    .bind(summary)
+    .bind(metadata)
+    .bind(now)
+    .execute(pool)
+    .await
+    .map_err(|e| format!("Failed to insert task activity log for task {}: {}", task_id, e))?;
+    Ok(())
+}
+
+async fn get_task_id_by_workspace(pool: &SqlitePool, workspace_id: &str) -> Result<Option<String>, String> {
+    sqlx::query_scalar("SELECT task_id FROM workspaces WHERE id = $1 LIMIT 1")
+        .bind(workspace_id)
+        .fetch_optional(pool)
+        .await
+        .map_err(|e| format!("Failed to resolve task_id by workspace {}: {}", workspace_id, e))
+}
+
+async fn demote_other_primary_workspaces(
+    pool: &SqlitePool,
+    task_id: &str,
+    current_workspace_id: &str,
+) -> Result<(), String> {
+    sqlx::query(
+        r#"UPDATE workspaces
+           SET role = 'fork', updated_at = $1
+           WHERE task_id = $2
+             AND id != $3
+             AND role = 'primary'"#,
+    )
+    .bind(chrono::Utc::now().timestamp())
+    .bind(task_id)
+    .bind(current_workspace_id)
+    .execute(pool)
+    .await
+    .map_err(|e| format!("Failed to demote existing primary workspaces for task {}: {}", task_id, e))?;
+    Ok(())
+}
+
+async fn count_workspace_session_starts(
+    pool: &SqlitePool,
+    task_id: &str,
+    workspace_id: &str,
+) -> Result<i64, String> {
+    sqlx::query_scalar(
+        r#"SELECT COUNT(1)
+           FROM task_activity_logs
+           WHERE task_id = $1
+             AND workspace_id = $2
+             AND event_type IN ('session_started', 'revision_session_started')"#,
+    )
+    .bind(task_id)
+    .bind(workspace_id)
+    .fetch_one(pool)
+    .await
+    .map_err(|e| format!("Failed to count session starts for workspace {}: {}", workspace_id, e))
+}
+
+#[derive(Debug, Clone)]
+struct SessionLineage {
+    attempt_no: i64,
+    parent_session_id: Option<String>,
+}
+
+async fn get_next_session_lineage(
+    pool: &SqlitePool,
+    workspace_id: &str,
+) -> Result<SessionLineage, String> {
+    let latest = sqlx::query(
+        r#"SELECT id, attempt_no
+           FROM sessions
+           WHERE workspace_id = $1
+           ORDER BY attempt_no DESC, updated_at DESC
+           LIMIT 1"#,
+    )
+    .bind(workspace_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|e| format!("Failed to query session lineage: {}", e))?;
+
+    if let Some(row) = latest {
+        let latest_attempt = row.try_get::<i64, _>("attempt_no").unwrap_or(1);
+        Ok(SessionLineage {
+            attempt_no: latest_attempt + 1,
+            parent_session_id: row.try_get("id").ok(),
+        })
+    } else {
+        Ok(SessionLineage {
+            attempt_no: 1,
+            parent_session_id: None,
+        })
+    }
+}
+
+async fn insert_session_row(
+    pool: &SqlitePool,
+    session_id: &str,
+    workspace_id: &str,
+    agent_cli: &str,
+    status: &str,
+    attempt_no: i64,
+    parent_session_id: Option<&str>,
+    now: i64,
+) -> Result<(), String> {
+    sqlx::query(
+        r#"INSERT INTO sessions (
+               id, workspace_id, agent_cli, status, attempt_no, parent_session_id, created_at, updated_at
+           ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)"#,
+    )
+    .bind(session_id)
+    .bind(workspace_id)
+    .bind(agent_cli)
+    .bind(status)
+    .bind(attempt_no)
+    .bind(parent_session_id)
+    .bind(now)
+    .bind(now)
+    .execute(pool)
+    .await
+    .map_err(|e| format!("Failed to insert session: {}", e))?;
+
+    Ok(())
+}
+
+async fn mark_session_status(
+    pool: &SqlitePool,
+    session_id: &str,
+    status: &str,
+) -> Result<(), String> {
+    sqlx::query(
+        r#"UPDATE sessions
+           SET status = $1,
+               updated_at = $2
+           WHERE id = $3"#,
+    )
+    .bind(status)
+    .bind(chrono::Utc::now().timestamp())
+    .bind(session_id)
+    .execute(pool)
+    .await
+    .map_err(|e| format!("Failed to update session status: {}", e))?;
+
+    Ok(())
+}
+
+async fn ensure_session_row(
+    pool: &SqlitePool,
+    session_id: &str,
+    workspace_id: &str,
+    agent_cli: &str,
+) -> Result<SessionLineage, String> {
+    let existing = sqlx::query(
+        r#"SELECT attempt_no, parent_session_id
+           FROM sessions
+           WHERE id = $1
+           LIMIT 1"#,
+    )
+    .bind(session_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|e| format!("Failed to query existing session: {}", e))?;
+
+    if let Some(row) = existing {
+        return Ok(SessionLineage {
+            attempt_no: row.try_get::<i64, _>("attempt_no").unwrap_or(1),
+            parent_session_id: row.try_get("parent_session_id").ok(),
+        });
+    }
+
+    let lineage = get_next_session_lineage(pool, workspace_id).await?;
+    let now = chrono::Utc::now().timestamp();
+    insert_session_row(
+        pool,
+        session_id,
+        workspace_id,
+        agent_cli,
+        "running",
+        lineage.attempt_no,
+        lineage.parent_session_id.as_deref(),
+        now,
+    )
+    .await?;
+
+    if let Some(parent_session_id) = lineage.parent_session_id.as_deref() {
+        let _ = mark_session_status(pool, parent_session_id, "closed").await;
+    }
+
+    Ok(lineage)
 }
 
 #[derive(serde::Deserialize)]
@@ -2083,6 +2454,10 @@ pub struct Session {
     pub working_dir: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub model_id: Option<String>,
+    pub status: String,
+    pub attempt_no: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parent_session_id: Option<String>,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -2455,12 +2830,50 @@ pub fn start_process_status_update_listener(
 }
 
 async fn create_session(
+    State(state): State<HttpServerState>,
     Json(payload): Json<CreateSessionRequest>,
 ) -> Result<Json<ApiResponse<Session>>, String> {
     log_other!(info, "Creating session for workspace: {}, model: {:?}", payload.workspace_id, payload.model_id);
 
     let session_id = uuid::Uuid::new_v4().to_string();
     let now = chrono::Utc::now().to_rfc3339();
+    let mut attempt_no = 1_i64;
+    let mut parent_session_id = None;
+
+    if let Some(pool) = get_db_pool_from_manager(&state.process_manager).await {
+        let agent_cli = payload
+            .executor
+            .clone()
+            .unwrap_or_else(|| "OPENCODE".to_string());
+        let lineage = ensure_session_row(pool.as_ref(), &session_id, &payload.workspace_id, &agent_cli).await?;
+        attempt_no = lineage.attempt_no;
+        parent_session_id = lineage.parent_session_id;
+        update_task_active_session_by_workspace(pool.as_ref(), &payload.workspace_id, &session_id).await?;
+        if let Some(task_id) = get_task_id_by_workspace(pool.as_ref(), &payload.workspace_id).await? {
+            let is_revision = attempt_no > 1;
+            let session_summary = if is_revision {
+                "Started a revision session in the active workspace"
+            } else {
+                "Started a new session in the active workspace"
+            };
+            insert_task_activity_log(
+                pool.as_ref(),
+                &task_id,
+                Some(&payload.workspace_id),
+                Some(&session_id),
+                if is_revision { "revision_session_started" } else { "session_started" },
+                session_summary,
+                Some(if is_revision { "continuation=retry" } else { "continuation=fresh" }),
+            ).await?;
+            let attempt_count = count_task_attempts(pool.as_ref(), &task_id).await?;
+            update_task_attempt_tracking(
+                pool.as_ref(),
+                &task_id,
+                Some(session_summary),
+                Some(attempt_count),
+            ).await?;
+        }
+    }
 
     let session = Session {
         id: session_id.clone(),
@@ -2468,6 +2881,9 @@ async fn create_session(
         executor: payload.executor,
         working_dir: payload.working_dir,
         model_id: payload.model_id,
+        status: "running".to_string(),
+        attempt_no,
+        parent_session_id,
         created_at: now.clone(),
         updated_at: now,
     };
@@ -2479,12 +2895,14 @@ async fn create_session(
     EXECUTION_PROCESSES.write().await.insert(session_id, vec![]);
 
     log_other!(info,
-        "Session created: id={}, workspace={}, executor={:?}, working_dir={:?}, model_id={:?}",
+        "Session created: id={}, workspace={}, executor={:?}, working_dir={:?}, model_id={:?}, attempt_no={}, parent_session_id={:?}",
         session.id,
         session.workspace_id,
         session.executor,
         session.working_dir,
-        session.model_id
+        session.model_id,
+        session.attempt_no,
+        session.parent_session_id
     );
 
     Ok(Json(ApiResponse::success(session)))
@@ -2504,7 +2922,7 @@ async fn get_sessions(
             // 从数据库查询指定 workspace 的 sessions
             // 注意：数据库列名为 agent_cli，但 Rust 结构体字段名为 executor
             let rows = sqlx::query(
-                r#"SELECT id, workspace_id, agent_cli, created_at, updated_at
+                r#"SELECT id, workspace_id, agent_cli, status, attempt_no, parent_session_id, created_at, updated_at
                    FROM sessions
                    WHERE workspace_id = $1
                    ORDER BY updated_at DESC"#
@@ -2523,6 +2941,9 @@ async fn get_sessions(
                     executor: row.try_get("agent_cli").ok(),  // 将数据库的 agent_cli 映射到 executor 字段
                     working_dir: None,
                     model_id: None,
+                    status: row.try_get("status").unwrap_or_else(|_| "running".to_string()),
+                    attempt_no: row.try_get::<i64, _>("attempt_no").unwrap_or(1),
+                    parent_session_id: row.try_get("parent_session_id").ok(),
                     created_at: timestamp_to_iso(created_at),
                     updated_at: timestamp_to_iso(updated_at),
                 })
@@ -2530,7 +2951,7 @@ async fn get_sessions(
         } else {
             // 查询所有 sessions
             let rows = sqlx::query(
-                r#"SELECT id, workspace_id, agent_cli, created_at, updated_at
+                r#"SELECT id, workspace_id, agent_cli, status, attempt_no, parent_session_id, created_at, updated_at
                    FROM sessions
                    ORDER BY updated_at DESC"#
             )
@@ -2547,6 +2968,9 @@ async fn get_sessions(
                     executor: row.try_get("agent_cli").ok(),  // 将数据库的 agent_cli 映射到 executor 字段
                     working_dir: None,
                     model_id: None,
+                    status: row.try_get("status").unwrap_or_else(|_| "running".to_string()),
+                    attempt_no: row.try_get::<i64, _>("attempt_no").unwrap_or(1),
+                    parent_session_id: row.try_get("parent_session_id").ok(),
                     created_at: timestamp_to_iso(created_at),
                     updated_at: timestamp_to_iso(updated_at),
                 })
@@ -2583,7 +3007,7 @@ async fn get_session(
         log_other!(info, "[get_session] Reading session from database");
 
         let row = sqlx::query(
-            r#"SELECT id, workspace_id, agent_cli, created_at, updated_at
+            r#"SELECT id, workspace_id, agent_cli, status, attempt_no, parent_session_id, created_at, updated_at
                FROM sessions
                WHERE id = $1"#
         )
@@ -2601,6 +3025,9 @@ async fn get_session(
                 executor: row.try_get("agent_cli").ok(),
                 working_dir: None,
                 model_id: None,
+                status: row.try_get("status").unwrap_or_else(|_| "running".to_string()),
+                attempt_no: row.try_get::<i64, _>("attempt_no").unwrap_or(1),
+                parent_session_id: row.try_get("parent_session_id").ok(),
                 created_at: timestamp_to_iso(created_at),
                 updated_at: timestamp_to_iso(updated_at),
             };
@@ -2882,7 +3309,7 @@ async fn session_follow_up(
             .ok_or("Session not found in memory and database not available")?;
 
         let row = sqlx::query(
-            r#"SELECT id, workspace_id, agent_cli, created_at, updated_at
+            r#"SELECT id, workspace_id, agent_cli, status, attempt_no, parent_session_id, created_at, updated_at
                FROM sessions
                WHERE id = $1"#
         )
@@ -2900,6 +3327,9 @@ async fn session_follow_up(
                 executor: row.try_get("agent_cli").ok(),
                 working_dir: None,
                 model_id: None,
+                status: row.try_get("status").unwrap_or_else(|_| "running".to_string()),
+                attempt_no: row.try_get::<i64, _>("attempt_no").unwrap_or(1),
+                parent_session_id: row.try_get("parent_session_id").ok(),
                 created_at: timestamp_to_iso(created_at),
                 updated_at: timestamp_to_iso(updated_at),
             };
@@ -3027,16 +3457,7 @@ async fn session_follow_up(
         if session_exists.is_none() {
             // Session 不存在，需要先创建
             let agent_cli = session.executor.clone().unwrap_or_else(|| "OPENCODE".to_string());
-            if let Err(e) = sqlx::query(
-                "INSERT INTO sessions (id, workspace_id, agent_cli, created_at, updated_at) VALUES ($1, $2, $3, $4, $5)"
-            )
-            .bind(&session_id)
-            .bind(&workspace_id)
-            .bind(&agent_cli)
-            .bind(now_unix)
-            .bind(now_unix)
-            .execute(pool.as_ref())
-            .await {
+            if let Err(e) = ensure_session_row(pool.as_ref(), &session_id, &workspace_id, &agent_cli).await {
                 log_other!(warn, "Failed to create session in DB: {}", e);
             } else {
                 log_other!(info, "Created session in DB: id={}, workspace_id={}", session_id, workspace_id);
@@ -4944,20 +5365,269 @@ async fn create_workspace(
     }))
 }
 
+async fn copy_workspace_files(
+    Json(payload): Json<CopyWorkspaceFilesRequest>,
+) -> Result<Json<ApiResponse<CopyWorkspaceFilesResponse>>, String> {
+    let source_root = PathBuf::from(&payload.source_repo_path);
+    let target_root = PathBuf::from(&payload.target_worktree_path);
+
+    if !source_root.exists() || !source_root.is_dir() {
+        return Err(format!("Source repo path not found: {}", payload.source_repo_path));
+    }
+    if !target_root.exists() || !target_root.is_dir() {
+        return Err(format!("Target worktree path not found: {}", payload.target_worktree_path));
+    }
+
+    let mut copied = Vec::new();
+    let mut skipped = Vec::new();
+
+    for raw in payload.files {
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+
+        let is_recursive_dir = trimmed.ends_with("/**");
+        let normalized_relative = if is_recursive_dir {
+            trimmed.trim_end_matches("/**")
+        } else {
+            trimmed
+        };
+
+        let src_path = match resolve_relative_path(&source_root, normalized_relative) {
+            Ok(path) => path,
+            Err(_) => {
+                skipped.push(trimmed.to_string());
+                continue;
+            }
+        };
+        let dst_path = match resolve_relative_path(&target_root, normalized_relative) {
+            Ok(path) => path,
+            Err(_) => {
+                skipped.push(trimmed.to_string());
+                continue;
+            }
+        };
+
+        if !src_path.exists() {
+            skipped.push(trimmed.to_string());
+            continue;
+        }
+
+        if is_recursive_dir || src_path.is_dir() {
+            copy_dir_recursive_local(&src_path, &dst_path)?;
+            copied.push(trimmed.to_string());
+            continue;
+        }
+
+        if let Some(parent) = dst_path.parent() {
+            fs::create_dir_all(parent)
+                .map_err(|e| format!("Failed to create parent dir {:?}: {}", parent, e))?;
+        }
+        fs::copy(&src_path, &dst_path)
+            .map_err(|e| format!("Failed to copy {:?} to {:?}: {}", src_path, dst_path, e))?;
+        copied.push(trimmed.to_string());
+    }
+
+    Ok(Json(ApiResponse::success(CopyWorkspaceFilesResponse { copied, skipped })))
+}
+
 async fn delete_workspace(
     Path(workspace_id): Path<String>,
-    Json(payload): Json<serde_json::Value>,
-) -> Result<Json<serde_json::Value>, String> {
-    let repo_path = payload.get("repo_path")
-        .and_then(|v| v.as_str())
-        .ok_or("repo_path is required")?;
+    State(state): State<HttpServerState>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let pool = get_db_pool_from_manager(&state.process_manager)
+        .await
+        .ok_or((StatusCode::INTERNAL_SERVER_ERROR, "Database pool not available".to_string()))?;
 
-    log_other!(info, "Deleting workspace: id={}, repo={}", workspace_id, repo_path);
+    let row = sqlx::query(
+        r#"SELECT
+               w.id,
+               w.task_id,
+               w.role,
+               w.agent_working_dir,
+               w.archived,
+               t.status AS task_status,
+               t.task_type,
+               t.active_workspace_id,
+               p.repo_path
+           FROM workspaces w
+           INNER JOIN tasks t ON t.id = w.task_id
+           INNER JOIN projects p ON p.id = t.project_id
+           WHERE w.id = $1
+           LIMIT 1"#,
+    )
+    .bind(&workspace_id)
+    .fetch_optional(pool.as_ref())
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to fetch workspace for cleanup: {}", e)))?
+    .ok_or_else(|| (StatusCode::NOT_FOUND, format!("Workspace not found: {}", workspace_id)))?;
 
-    let manager = WorktreeManager::new(PathBuf::from(repo_path), None);
-    manager.remove_worktree(&workspace_id)?;
+    let task_id: String = row.get("task_id");
+    let task_status: String = row.get("task_status");
+    let task_type: String = row.try_get("task_type").unwrap_or_else(|_| "normal".to_string());
+    let repo_path: String = row.get("repo_path");
+    let role: String = row.try_get("role").unwrap_or_else(|_| "primary".to_string());
+    let active_workspace_id: Option<String> = row.try_get("active_workspace_id").ok();
+    let agent_working_dir: Option<String> = row.try_get("agent_working_dir").ok();
+    let already_archived = row.try_get::<i32, _>("archived").unwrap_or(0) == 1;
 
-    Ok(Json(serde_json::json!({"success": true})))
+    if already_archived {
+        return Ok(Json(serde_json::json!({
+            "success": true,
+            "archived": true,
+            "workspaceId": workspace_id,
+            "message": "Workspace already archived"
+        })));
+    }
+
+    if task_status != "done" && task_status != "cancelled" {
+        return Err((
+            StatusCode::CONFLICT,
+            format!(
+                "Workspace cleanup is only allowed when task status is done or cancelled (current: {})",
+                task_status
+            ),
+        ));
+    }
+
+    let should_remove_worktree = task_type != "direct"
+        && agent_working_dir
+            .as_deref()
+            .map(|dir| dir.trim() != repo_path.trim())
+            .unwrap_or(true);
+
+    if should_remove_worktree {
+        log_other!(info, "Cleaning up workspace: id={}, repo={}", workspace_id, repo_path);
+        let manager = WorktreeManager::new(PathBuf::from(&repo_path), None);
+        manager
+            .remove_worktree(&workspace_id)
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    } else {
+        log_other!(info, "Archiving workspace without physical worktree removal: id={}, task_type={}", workspace_id, task_type);
+    }
+
+    let now = chrono::Utc::now().timestamp();
+    sqlx::query(
+        r#"UPDATE workspaces
+           SET archived = 1,
+               updated_at = $1
+           WHERE id = $2"#,
+    )
+    .bind(now)
+    .bind(&workspace_id)
+    .execute(pool.as_ref())
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to archive workspace: {}", e)))?;
+
+    sqlx::query(
+        r#"UPDATE sessions
+           SET status = 'closed',
+               updated_at = $1
+           WHERE workspace_id = $2
+             AND status != 'closed'"#,
+    )
+    .bind(now)
+    .bind(&workspace_id)
+    .execute(pool.as_ref())
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to close workspace sessions: {}", e)))?;
+
+    if active_workspace_id.as_deref() == Some(workspace_id.as_str()) {
+        let replacement = sqlx::query(
+            r#"SELECT id, role
+               FROM workspaces
+               WHERE task_id = $1
+                 AND id != $2
+                 AND archived = 0
+               ORDER BY updated_at DESC, created_at DESC
+               LIMIT 1"#,
+        )
+        .bind(&task_id)
+        .bind(&workspace_id)
+        .fetch_optional(pool.as_ref())
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to resolve replacement workspace: {}", e)))?;
+
+        if let Some(replacement_row) = replacement {
+            let replacement_workspace_id: String = replacement_row.get("id");
+            let replacement_role: String = replacement_row
+                .try_get("role")
+                .unwrap_or_else(|_| "fork".to_string());
+            if role == "primary" && replacement_role != "primary" {
+                sqlx::query(
+                    r#"UPDATE workspaces
+                       SET role = 'primary',
+                           updated_at = $1
+                       WHERE id = $2"#,
+                )
+                .bind(now)
+                .bind(&replacement_workspace_id)
+                .execute(pool.as_ref())
+                .await
+                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to promote replacement workspace: {}", e)))?;
+            }
+
+            let replacement_session_id: Option<String> = sqlx::query_scalar(
+                r#"SELECT id
+                   FROM sessions
+                   WHERE workspace_id = $1
+                   ORDER BY attempt_no DESC, updated_at DESC
+                   LIMIT 1"#,
+            )
+            .bind(&replacement_workspace_id)
+            .fetch_optional(pool.as_ref())
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to resolve replacement session: {}", e)))?
+            .flatten();
+
+            sqlx::query(
+                r#"UPDATE tasks
+                   SET active_workspace_id = $1,
+                       active_session_id = $2,
+                       updated_at = $3
+                   WHERE id = $4"#,
+            )
+            .bind(&replacement_workspace_id)
+            .bind(&replacement_session_id)
+            .bind(now)
+            .bind(&task_id)
+            .execute(pool.as_ref())
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to update task active workspace after cleanup: {}", e)))?;
+        } else {
+            sqlx::query(
+                r#"UPDATE tasks
+                   SET active_workspace_id = NULL,
+                       active_session_id = NULL,
+                       updated_at = $1
+                   WHERE id = $2"#,
+            )
+            .bind(now)
+            .bind(&task_id)
+            .execute(pool.as_ref())
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to clear task active workspace after cleanup: {}", e)))?;
+        }
+    }
+
+    insert_task_activity_log(
+        pool.as_ref(),
+        &task_id,
+        Some(&workspace_id),
+        None,
+        "workspace_archived",
+        "Archived workspace and cleaned up execution environment",
+        Some(if should_remove_worktree { "removed_worktree=true" } else { "removed_worktree=false" }),
+    )
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+
+    Ok(Json(serde_json::json!({
+        "success": true,
+        "archived": true,
+        "workspaceId": workspace_id
+    })))
 }
 
 /// Get workspace by ID (from database)
@@ -4972,7 +5642,7 @@ async fn get_workspace_by_id(
         .ok_or("Database pool not available")?;
 
     let row = sqlx::query(
-        "SELECT id, task_id, branch, base_branch, agent_working_dir, setup_completed_at, agent_cli, archived, pinned, created_at, updated_at
+        "SELECT id, task_id, branch, role, source_workspace_id, base_branch, agent_working_dir, setup_completed_at, agent_cli, archived, pinned, created_at, updated_at
          FROM workspaces WHERE id = $1"
     )
     .bind(&workspace_id)
@@ -4987,6 +5657,8 @@ async fn get_workspace_by_id(
                 id: row.try_get("id").ok().ok_or("Failed to get id")?,
                 task_id: row.try_get("task_id").ok().ok_or("Failed to get task_id")?,
                 branch: row.try_get("branch").ok().ok_or("Failed to get branch")?,
+                role: row.try_get::<String, _>("role").unwrap_or_else(|_| "primary".to_string()),
+                source_workspace_id: row.try_get("source_workspace_id").ok(),
                 base_branch: row.try_get("base_branch").ok(),
                 agent_working_dir: row.try_get("agent_working_dir").ok(),
                 setup_completed_at: setup_ts.map(|ts| timestamp_to_iso(Some(ts))),
@@ -5793,7 +6465,7 @@ async fn get_tasks_by_project(
         .ok_or("Database pool not available")?;
 
     let rows = sqlx::query(
-        r#"SELECT id, project_id, title, description, status, agent_cli, model_id, position, created_at, updated_at
+        r#"SELECT id, project_id, title, description, status, agent_cli, model_id, task_type, active_workspace_id, active_session_id, last_attempt_summary, attempt_count, direct_branch, position, created_at, updated_at
            FROM tasks WHERE project_id = $1 ORDER BY position ASC"#
     )
     .bind(&project_id)
@@ -5828,6 +6500,10 @@ async fn get_tasks_by_project(
             agent_cli: row.try_get::<String, _>("agent_cli").unwrap_or_else(|_| "OPENCODE".to_string()),
             model_id: row.try_get("model_id").ok(),
             task_type: row.try_get::<String, _>("task_type").unwrap_or_else(|_| "normal".to_string()),
+            active_workspace_id: row.try_get("active_workspace_id").ok(),
+            active_session_id: row.try_get("active_session_id").ok(),
+            last_attempt_summary: row.try_get("last_attempt_summary").ok(),
+            attempt_count: row.try_get("attempt_count").unwrap_or(0),
             direct_branch: row.try_get("direct_branch").ok(),
             image_ids,
             position: row.try_get("position").unwrap_or(0),
@@ -5848,7 +6524,7 @@ async fn get_task_by_id(
         .ok_or("Database pool not available")?;
 
     let row = sqlx::query(
-        r#"SELECT id, project_id, title, description, status, agent_cli, model_id, task_type, direct_branch, position, created_at, updated_at
+        r#"SELECT id, project_id, title, description, status, agent_cli, model_id, task_type, active_workspace_id, active_session_id, last_attempt_summary, attempt_count, direct_branch, position, created_at, updated_at
            FROM tasks WHERE id = $1 LIMIT 1"#
     )
     .bind(&id)
@@ -5883,12 +6559,55 @@ async fn get_task_by_id(
         agent_cli: row.try_get::<String, _>("agent_cli").unwrap_or_else(|_| "OPENCODE".to_string()),
         model_id: row.try_get("model_id").ok(),
         task_type: row.try_get::<String, _>("task_type").unwrap_or_else(|_| "normal".to_string()),
+        active_workspace_id: row.try_get("active_workspace_id").ok(),
+        active_session_id: row.try_get("active_session_id").ok(),
+        last_attempt_summary: row.try_get("last_attempt_summary").ok(),
+        attempt_count: row.try_get("attempt_count").unwrap_or(0),
         direct_branch: row.try_get("direct_branch").ok(),
         image_ids,
         position: row.try_get("position").unwrap_or(0),
         created_at: timestamp_to_iso(created_at),
         updated_at: timestamp_to_iso(updated_at),
     }))
+}
+
+async fn get_task_activity_logs(
+    State(state): State<HttpServerState>,
+    Path(task_id): Path<String>,
+) -> Result<Json<ApiResponse<Vec<TaskActivityLogResponse>>>, String> {
+    let pool = get_db_pool_from_manager(&state.process_manager)
+        .await
+        .ok_or("Database pool not available")?;
+
+    let rows = sqlx::query(
+        r#"SELECT id, task_id, workspace_id, session_id, event_type, summary, metadata, created_at
+           FROM task_activity_logs
+           WHERE task_id = $1
+           ORDER BY created_at DESC
+           LIMIT 20"#
+    )
+    .bind(&task_id)
+    .fetch_all(pool.as_ref())
+    .await
+    .map_err(|e| format!("Failed to fetch task activity logs: {}", e))?;
+
+    let logs = rows
+        .into_iter()
+        .filter_map(|row| {
+            Some(TaskActivityLogResponse {
+                id: row.try_get("id").ok()?,
+                task_id: row.try_get("task_id").ok()?,
+                workspace_id: row.try_get("workspace_id").ok(),
+                session_id: row.try_get("session_id").ok(),
+                event_type: row.try_get("event_type").ok()?,
+                summary: row.try_get("summary").ok()?,
+                metadata: row.try_get("metadata").ok(),
+                created_at: timestamp_to_iso(row.try_get("created_at").ok()),
+            })
+        })
+        .collect();
+
+    Ok(Json(ApiResponse::success(logs)))
 }
 
 async fn create_task(
@@ -5908,8 +6627,8 @@ async fn create_task(
     let image_ids = payload.image_ids.unwrap_or_default();
 
     sqlx::query(
-        r#"INSERT INTO tasks (id, project_id, title, description, status, agent_cli, model_id, task_type, direct_branch, position, created_at, updated_at)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)"#
+        r#"INSERT INTO tasks (id, project_id, title, description, status, agent_cli, model_id, task_type, last_attempt_summary, attempt_count, direct_branch, position, created_at, updated_at)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NULL, 0, $9, $10, $11, $12)"#
     )
     .bind(&task_id)
     .bind(&payload.project_id)
@@ -5940,6 +6659,10 @@ async fn create_task(
         agent_cli,
         model_id: payload.model_id,
         task_type,
+        active_workspace_id: None,
+        active_session_id: None,
+        last_attempt_summary: None,
+        attempt_count: 0,
         direct_branch: payload.direct_branch,
         image_ids,
         position,
@@ -5973,6 +6696,24 @@ async fn update_task(
     let model_id = payload.model_id.or_else(|| existing.try_get("model_id").ok());
     let task_type = payload.task_type.unwrap_or_else(|| existing.try_get::<String, _>("task_type").unwrap_or_else(|_| "normal".to_string()));
     let direct_branch = payload.direct_branch.or_else(|| existing.try_get("direct_branch").ok());
+    let active_workspace_id = if payload.active_workspace_id.is_some() {
+        payload.active_workspace_id.and_then(|value| {
+            let trimmed = value.trim().to_string();
+            if trimmed.is_empty() { None } else { Some(trimmed) }
+        })
+    } else {
+        existing.try_get("active_workspace_id").ok()
+    };
+    let active_session_id = if payload.active_session_id.is_some() {
+        payload.active_session_id.and_then(|value| {
+            let trimmed = value.trim().to_string();
+            if trimmed.is_empty() { None } else { Some(trimmed) }
+        })
+    } else {
+        existing.try_get("active_session_id").ok()
+    };
+    let mut last_attempt_summary = existing.try_get("last_attempt_summary").ok();
+    let attempt_count = existing.try_get("attempt_count").unwrap_or(0);
     let position = payload.position.unwrap_or_else(|| existing.try_get("position").unwrap_or(0));
     let image_ids = if let Some(ids) = payload.image_ids {
         ids
@@ -5981,8 +6722,18 @@ async fn update_task(
     };
 
     sqlx::query(
-        r#"UPDATE tasks SET title = $1, description = $2, status = $3, agent_cli = $4, model_id = $5, position = $6, updated_at = $7
-           WHERE id = $8"#
+        r#"UPDATE tasks
+           SET title = $1,
+               description = $2,
+               status = $3,
+               agent_cli = $4,
+               model_id = $5,
+               position = $6,
+               direct_branch = $7,
+               active_workspace_id = $8,
+               active_session_id = $9,
+               updated_at = $10
+           WHERE id = $11"#
     )
     .bind(&title)
     .bind(&description)
@@ -5990,11 +6741,51 @@ async fn update_task(
     .bind(&agent_cli)
     .bind(&model_id)
     .bind(position)
+    .bind(&direct_branch)
+    .bind(&active_workspace_id)
+    .bind(&active_session_id)
     .bind(now)
     .bind(&id)
     .execute(pool.as_ref())
     .await
     .map_err(|e| format!("Failed to update task: {}", e))?;
+
+    let previous_status = existing.try_get::<String, _>("status").unwrap_or_else(|_| "todo".to_string());
+    if previous_status != status {
+        let next_session_status = match status.as_str() {
+            "inprogress" => Some("running"),
+            "pending" => Some("inreview"),
+            "done" | "cancelled" => Some("closed"),
+            _ => None,
+        };
+        if let (Some(session_id), Some(session_status)) = (active_session_id.as_deref(), next_session_status) {
+            let _ = mark_session_status(pool.as_ref(), session_id, session_status).await;
+        }
+
+        let summary = match status.as_str() {
+            "inprogress" => "Task moved to in progress",
+            "pending" => "Task moved to in review",
+            "done" => "Task marked done",
+            "cancelled" => "Task cancelled",
+            _ => "Task status updated",
+        };
+        let _ = insert_task_activity_log(
+            pool.as_ref(),
+            &id,
+            active_workspace_id.as_deref(),
+            active_session_id.as_deref(),
+            "task_status_changed",
+            summary,
+            Some(&format!("from={} to={}", previous_status, status)),
+        ).await;
+        let _ = update_task_attempt_tracking(
+            pool.as_ref(),
+            &id,
+            Some(summary),
+            None,
+        ).await;
+        last_attempt_summary = Some(summary.to_string());
+    }
 
     upsert_task_images(pool.as_ref(), &id, &image_ids).await?;
 
@@ -6007,6 +6798,10 @@ async fn update_task(
         agent_cli,
         model_id,
         task_type,
+        active_workspace_id,
+        active_session_id,
+        last_attempt_summary,
+        attempt_count,
         direct_branch,
         image_ids,
         position,
@@ -6188,6 +6983,8 @@ pub struct WorkspaceResponse {
     pub id: String,
     pub task_id: String,
     pub branch: String,
+    pub role: String,
+    pub source_workspace_id: Option<String>,
     pub base_branch: Option<String>,
     pub agent_working_dir: Option<String>,
     pub setup_completed_at: Option<String>,
@@ -6204,6 +7001,8 @@ pub struct WorkspaceResponse {
 pub struct CreateTaskWorkspaceRequest {
     pub workspace_id: Option<String>,
     pub branch: Option<String>,
+    pub role: Option<String>,
+    pub source_workspace_id: Option<String>,
     pub base_branch: Option<String>,
     pub agent_working_dir: Option<String>,
     pub setup_completed_at: Option<i64>,
@@ -6220,7 +7019,7 @@ async fn get_task_workspaces(
         .ok_or("Database pool not available")?;
 
     let rows = sqlx::query(
-        "SELECT id, task_id, branch, base_branch, agent_working_dir, setup_completed_at, agent_cli, archived, pinned, created_at, updated_at
+        "SELECT id, task_id, branch, role, source_workspace_id, base_branch, agent_working_dir, setup_completed_at, agent_cli, archived, pinned, created_at, updated_at
          FROM workspaces WHERE task_id = $1 ORDER BY created_at DESC"
     )
     .bind(&task_id)
@@ -6236,6 +7035,8 @@ async fn get_task_workspaces(
                 id: row.try_get("id").ok()?,
                 task_id: row.try_get("task_id").ok()?,
                 branch: row.try_get("branch").ok()?,
+                role: row.try_get::<String, _>("role").unwrap_or_else(|_| "primary".to_string()),
+                source_workspace_id: row.try_get("source_workspace_id").ok(),
                 base_branch: row.try_get("base_branch").ok(),
                 agent_working_dir: row.try_get("agent_working_dir").ok(),
                 setup_completed_at: setup_ts.map(|ts| timestamp_to_iso(Some(ts))),
@@ -6268,6 +7069,7 @@ async fn create_task_workspace(
     });
     let now = chrono::Utc::now().timestamp();
     let agent_cli = payload.agent_cli.unwrap_or_else(|| "OPENCODE".to_string());
+    let role = payload.role.unwrap_or_else(|| "primary".to_string());
     let branch = payload
         .branch
         .as_deref()
@@ -6285,12 +7087,14 @@ async fn create_task_workspace(
         .unwrap_or_else(|| "main".to_string());
 
     sqlx::query(
-        "INSERT INTO workspaces (id, task_id, branch, base_branch, agent_working_dir, setup_completed_at, agent_cli, archived, pinned, created_at, updated_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, 0, 0, $8, $9)"
+        "INSERT INTO workspaces (id, task_id, branch, role, source_workspace_id, base_branch, agent_working_dir, setup_completed_at, agent_cli, archived, pinned, created_at, updated_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 0, 0, $10, $11)"
     )
     .bind(&workspace_id)
     .bind(&task_id)
     .bind(&branch)
+    .bind(&role)
+    .bind(&payload.source_workspace_id)
     .bind(&payload.base_branch)
     .bind(&payload.agent_working_dir)
     .bind(payload.setup_completed_at)
@@ -6301,10 +7105,27 @@ async fn create_task_workspace(
     .await
     .map_err(|e| format!("Failed to create workspace: {}", e))?;
 
+    if role == "primary" {
+        demote_other_primary_workspaces(pool.as_ref(), &task_id, &workspace_id).await?;
+    }
+
+    update_task_active_workspace(pool.as_ref(), &task_id, &workspace_id).await?;
+    insert_task_activity_log(
+        pool.as_ref(),
+        &task_id,
+        Some(&workspace_id),
+        None,
+        "workspace_created",
+        &format!("Created {} workspace on branch {}", role, branch),
+        payload.source_workspace_id.as_deref().or(payload.agent_working_dir.as_deref()),
+    ).await?;
+
     Ok(Json(WorkspaceResponse {
         id: workspace_id,
         task_id,
         branch,
+        role,
+        source_workspace_id: payload.source_workspace_id,
         base_branch: payload.base_branch,
         agent_working_dir: payload.agent_working_dir,
         setup_completed_at: payload.setup_completed_at.map(|ts| timestamp_to_iso(Some(ts))),
@@ -6342,18 +7163,24 @@ async fn create_workspace_session(
     let now = chrono::Utc::now().timestamp();
     let agent_cli = payload.agent_cli.unwrap_or_else(|| "OPENCODE".to_string());
 
-    // Create session
-    sqlx::query(
-        "INSERT INTO sessions (id, workspace_id, agent_cli, created_at, updated_at) VALUES ($1, $2, $3, $4, $5)"
-    )
-    .bind(&session_id)
-    .bind(&workspace_id)
-    .bind(&agent_cli)
-    .bind(now)
-    .bind(now)
-    .execute(pool.as_ref())
-    .await
-    .map_err(|e| format!("Failed to create session: {}", e))?;
+    let lineage = ensure_session_row(pool.as_ref(), &session_id, &workspace_id, &agent_cli).await?;
+    update_task_active_session_by_workspace(pool.as_ref(), &workspace_id, &session_id).await?;
+    if let Some(task_id) = get_task_id_by_workspace(pool.as_ref(), &workspace_id).await? {
+        let is_revision = lineage.attempt_no > 1;
+        insert_task_activity_log(
+            pool.as_ref(),
+            &task_id,
+            Some(&workspace_id),
+            Some(&session_id),
+            if is_revision { "revision_session_started" } else { "session_started" },
+            if is_revision {
+                "Started a revision session in the active workspace"
+            } else {
+                "Started a new session in the active workspace"
+            },
+            Some(if is_revision { "continuation=retry" } else { "continuation=fresh" }),
+        ).await?;
+    }
 
     // Create execution process
     sqlx::query(
@@ -6376,6 +7203,9 @@ async fn create_workspace_session(
         executor: None,
         working_dir: None,
         model_id: None,
+        status: "running".to_string(),
+        attempt_no: lineage.attempt_no,
+        parent_session_id: lineage.parent_session_id,
         created_at: timestamp_to_iso(Some(now)),
         updated_at: timestamp_to_iso(Some(now)),
     }))
@@ -6689,16 +7519,7 @@ async fn execute_agent(
         if session_exists.is_none() {
             // Session 不存在，需要先创建
             let agent_cli = agent_name.clone();
-            if let Err(e) = sqlx::query(
-                "INSERT INTO sessions (id, workspace_id, agent_cli, created_at, updated_at) VALUES ($1, $2, $3, $4, $5)"
-            )
-            .bind(&request_session_id)
-            .bind(&workspace_id)
-            .bind(&agent_cli)
-            .bind(now)
-            .bind(now)
-            .execute(&*pool)
-            .await {
+            if let Err(e) = ensure_session_row(pool.as_ref(), &request_session_id, &workspace_id, &agent_cli).await {
                 log_other!(warn, "[execute_agent] Failed to create session in DB: {}", e);
             } else {
                 log_other!(info, "[execute_agent] Created session in DB: id={}, workspace_id={}", request_session_id, workspace_id);
@@ -6762,6 +7583,9 @@ async fn execute_agent(
             executor: Some(agent_name.clone()),
             working_dir: Some(working_dir.clone()),
             model_id: None,
+            status: "running".to_string(),
+            attempt_no: 1,
+            parent_session_id: None,
             created_at: now.clone(),
             updated_at: now.clone(),
         });
@@ -6843,16 +7667,7 @@ async fn send_follow_up(
             let agent_cli = session.as_ref()
                 .and_then(|s| s.executor.clone())
                 .unwrap_or_else(|| "OPENCODE".to_string());
-            if let Err(e) = sqlx::query(
-                "INSERT INTO sessions (id, workspace_id, agent_cli, created_at, updated_at) VALUES ($1, $2, $3, $4, $5)"
-            )
-            .bind(&session_id)
-            .bind(&workspace_id)
-            .bind(&agent_cli)
-            .bind(now_db)
-            .bind(now_db)
-            .execute(&*pool)
-            .await {
+            if let Err(e) = ensure_session_row(pool.as_ref(), &session_id, &workspace_id, &agent_cli).await {
                 log_other!(warn, "[send_follow_up] Failed to create session in DB: {}", e);
             } else {
                 log_other!(info, "[send_follow_up] Created session in DB: id={}, workspace_id={}", session_id, workspace_id);
@@ -8851,6 +9666,7 @@ fn create_router(state: HttpServerState) -> Router {
         // Tasks API
         .route("/api/tasks", post(create_task))
         .route("/api/tasks/:id", get(get_task_by_id).put(update_task).delete(delete_task))
+        .route("/api/tasks/:id/activity-logs", get(get_task_activity_logs))
         .route("/api/tasks/:id/move", post(move_task))
         .route("/api/tasks/:id/workspaces", get(get_task_workspaces).post(create_task_workspace))
         .route("/api/projects/:id/tasks", get(get_tasks_by_project).post(create_task))
@@ -8882,6 +9698,7 @@ fn create_router(state: HttpServerState) -> Router {
         // Workspace management
         .route("/api/workspaces", post(create_workspace))
         .route("/api/workspaces", get(list_workspaces))
+        .route("/api/workspaces/copy-files", post(copy_workspace_files))
         .route("/api/workspaces/:workspace_id", get(get_workspace_by_id).delete(delete_workspace))
         .route("/api/workspaces/:id/sessions", post(create_workspace_session))
         .route("/api/workspaces/status", post(get_workspace_status))
@@ -9319,6 +10136,556 @@ mod tests {
             .to_string();
         assert!(official_id.starts_with("official::"));
         assert!(is_official_swarm_id(&official_id));
+
+        if db_dir.exists() {
+            let _ = std::fs::remove_dir_all(db_dir);
+        }
+    }
+
+    #[tokio::test]
+    async fn create_task_workspace_should_keep_single_primary_role() {
+        let (process_manager, db_dir) = create_test_process_manager_with_db().await;
+        let pool = get_db_pool_from_manager(&process_manager)
+            .await
+            .expect("db pool available");
+        sqlx::query(
+            "INSERT INTO projects (id, name, repo_path, target_branch, created_at, updated_at) VALUES ($1, $2, $3, $4, $5, $6)",
+        )
+        .bind("project-1")
+        .bind("Project")
+        .bind("/tmp/project")
+        .bind("main")
+        .bind(chrono::Utc::now().timestamp())
+        .bind(chrono::Utc::now().timestamp())
+        .execute(pool.as_ref())
+        .await
+        .expect("insert project");
+        sqlx::query(
+            "INSERT INTO tasks (id, project_id, title, description, status, agent_cli, task_type, created_at, updated_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
+        )
+        .bind("task-1")
+        .bind("project-1")
+        .bind("Task")
+        .bind("Task")
+        .bind("todo")
+        .bind("OPENCODE")
+        .bind("normal")
+        .bind(chrono::Utc::now().timestamp())
+        .bind(chrono::Utc::now().timestamp())
+        .execute(pool.as_ref())
+        .await
+        .expect("insert task");
+
+        let app = create_router(HttpServerState { process_manager });
+
+        let first_req = Request::builder()
+            .method(Method::POST)
+            .uri("/api/tasks/task-1/workspaces")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "workspaceId": "ws-primary-1",
+                    "branch": "feature/one",
+                    "role": "primary",
+                    "agentWorkingDir": "/tmp/ws-primary-1"
+                })
+                .to_string(),
+            ))
+            .expect("build first workspace request");
+        let first_resp = app.clone().oneshot(first_req).await.expect("create first workspace");
+        assert_eq!(first_resp.status(), StatusCode::OK);
+
+        let second_req = Request::builder()
+            .method(Method::POST)
+            .uri("/api/tasks/task-1/workspaces")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "workspaceId": "ws-primary-2",
+                    "branch": "feature/two",
+                    "role": "primary",
+                    "agentWorkingDir": "/tmp/ws-primary-2"
+                })
+                .to_string(),
+            ))
+            .expect("build second workspace request");
+        let second_resp = app.clone().oneshot(second_req).await.expect("create second workspace");
+        assert_eq!(second_resp.status(), StatusCode::OK);
+
+        let list_req = Request::builder()
+            .method(Method::GET)
+            .uri("/api/tasks/task-1/workspaces")
+            .body(Body::empty())
+            .expect("build workspace list request");
+        let list_resp = app.clone().oneshot(list_req).await.expect("list workspaces");
+        assert_eq!(list_resp.status(), StatusCode::OK);
+        let list_body = to_bytes(list_resp.into_body(), usize::MAX).await.expect("read workspace body");
+        let workspaces: serde_json::Value = serde_json::from_slice(&list_body).expect("parse workspaces");
+        let primary_count = workspaces
+            .as_array()
+            .expect("workspaces array")
+            .iter()
+            .filter(|item| item["role"] == "primary")
+            .count();
+        assert_eq!(primary_count, 1);
+        let latest_primary = workspaces
+            .as_array()
+            .expect("workspaces array")
+            .iter()
+            .find(|item| item["id"] == "ws-primary-2")
+            .expect("latest workspace exists");
+        assert_eq!(latest_primary["role"], "primary");
+
+        if db_dir.exists() {
+            let _ = std::fs::remove_dir_all(db_dir);
+        }
+    }
+
+    #[tokio::test]
+    async fn count_workspace_session_starts_should_include_revision_sessions() {
+        let (process_manager, db_dir) = create_test_process_manager_with_db().await;
+        let pool = get_db_pool_from_manager(&process_manager)
+            .await
+            .expect("db pool available");
+        let now = chrono::Utc::now().timestamp();
+        sqlx::query(
+            "INSERT INTO projects (id, name, repo_path, target_branch, created_at, updated_at) VALUES ($1, $2, $3, $4, $5, $6)",
+        )
+        .bind("project-1")
+        .bind("Project")
+        .bind("/tmp/project")
+        .bind("main")
+        .bind(now)
+        .bind(now)
+        .execute(pool.as_ref())
+        .await
+        .expect("insert project");
+        sqlx::query(
+            "INSERT INTO tasks (id, project_id, title, description, status, agent_cli, task_type, created_at, updated_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
+        )
+        .bind("task-1")
+        .bind("project-1")
+        .bind("Task")
+        .bind("Task")
+        .bind("todo")
+        .bind("OPENCODE")
+        .bind("normal")
+        .bind(now)
+        .bind(now)
+        .execute(pool.as_ref())
+        .await
+        .expect("insert task");
+        sqlx::query(
+            "INSERT INTO workspaces (id, task_id, branch, role, agent_working_dir, agent_cli, archived, pinned, created_at, updated_at) VALUES ($1, $2, $3, $4, $5, $6, 0, 0, $7, $8)",
+        )
+        .bind("ws-1")
+        .bind("task-1")
+        .bind("feature/one")
+        .bind("primary")
+        .bind("/tmp/ws-1")
+        .bind("OPENCODE")
+        .bind(now)
+        .bind(now)
+        .execute(pool.as_ref())
+        .await
+        .expect("insert workspace");
+        sqlx::query(
+            "INSERT INTO sessions (id, workspace_id, agent_cli, created_at, updated_at) VALUES ($1, $2, $3, $4, $5)",
+        )
+        .bind("sess-1")
+        .bind("ws-1")
+        .bind("OPENCODE")
+        .bind(now)
+        .bind(now)
+        .execute(pool.as_ref())
+        .await
+        .expect("insert first session");
+        sqlx::query(
+            "INSERT INTO sessions (id, workspace_id, agent_cli, created_at, updated_at) VALUES ($1, $2, $3, $4, $5)",
+        )
+        .bind("sess-2")
+        .bind("ws-1")
+        .bind("OPENCODE")
+        .bind(now)
+        .bind(now)
+        .execute(pool.as_ref())
+        .await
+        .expect("insert second session");
+
+        insert_task_activity_log(
+            pool.as_ref(),
+            "task-1",
+            Some("ws-1"),
+            Some("sess-1"),
+            "session_started",
+            "Started a new session in the active workspace",
+            Some("continuation=fresh"),
+        )
+        .await
+        .expect("insert initial session log");
+        insert_task_activity_log(
+            pool.as_ref(),
+            "task-1",
+            Some("ws-1"),
+            Some("sess-2"),
+            "revision_session_started",
+            "Started a revision session in the active workspace",
+            Some("continuation=retry"),
+        )
+        .await
+        .expect("insert revision session log");
+
+        let count = count_workspace_session_starts(pool.as_ref(), "task-1", "ws-1")
+            .await
+            .expect("count workspace session starts");
+        assert_eq!(count, 2);
+
+        if db_dir.exists() {
+            let _ = std::fs::remove_dir_all(db_dir);
+        }
+    }
+
+    #[tokio::test]
+    async fn create_session_should_increment_attempt_and_link_parent_session() {
+        let (process_manager, db_dir) = create_test_process_manager_with_db().await;
+        let pool = get_db_pool_from_manager(&process_manager)
+            .await
+            .expect("db pool available");
+        let now = chrono::Utc::now().timestamp();
+        sqlx::query(
+            "INSERT INTO projects (id, name, repo_path, target_branch, created_at, updated_at) VALUES ($1, $2, $3, $4, $5, $6)",
+        )
+        .bind("project-1")
+        .bind("Project")
+        .bind("/tmp/project")
+        .bind("main")
+        .bind(now)
+        .bind(now)
+        .execute(pool.as_ref())
+        .await
+        .expect("insert project");
+        sqlx::query(
+            "INSERT INTO tasks (id, project_id, title, description, status, agent_cli, task_type, created_at, updated_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
+        )
+        .bind("task-1")
+        .bind("project-1")
+        .bind("Task")
+        .bind("Task")
+        .bind("inprogress")
+        .bind("OPENCODE")
+        .bind("normal")
+        .bind(now)
+        .bind(now)
+        .execute(pool.as_ref())
+        .await
+        .expect("insert task");
+        sqlx::query(
+            "INSERT INTO workspaces (id, task_id, branch, role, agent_working_dir, agent_cli, archived, pinned, created_at, updated_at) VALUES ($1, $2, $3, $4, $5, $6, 0, 0, $7, $8)",
+        )
+        .bind("ws-1")
+        .bind("task-1")
+        .bind("feature/one")
+        .bind("primary")
+        .bind("/tmp/ws-1")
+        .bind("OPENCODE")
+        .bind(now)
+        .bind(now)
+        .execute(pool.as_ref())
+        .await
+        .expect("insert workspace");
+
+        let app = create_router(HttpServerState { process_manager });
+
+        let first_req = Request::builder()
+            .method(Method::POST)
+            .uri("/api/sessions")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "workspace_id": "ws-1",
+                    "executor": "OPENCODE"
+                })
+                .to_string(),
+            ))
+            .expect("build first session request");
+        let first_resp = app.clone().oneshot(first_req).await.expect("create first session");
+        assert_eq!(first_resp.status(), StatusCode::OK);
+        let first_body = to_bytes(first_resp.into_body(), usize::MAX).await.expect("read first session body");
+        let first_json: serde_json::Value = serde_json::from_slice(&first_body).expect("parse first session json");
+        let first_session = first_json["data"].clone();
+        let first_session_id = first_session["id"].as_str().expect("first session id").to_string();
+        assert_eq!(first_session["attempt_no"], 1);
+        assert!(first_session["parent_session_id"].is_null());
+
+        let second_req = Request::builder()
+            .method(Method::POST)
+            .uri("/api/sessions")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "workspace_id": "ws-1",
+                    "executor": "OPENCODE"
+                })
+                .to_string(),
+            ))
+            .expect("build second session request");
+        let second_resp = app.clone().oneshot(second_req).await.expect("create second session");
+        assert_eq!(second_resp.status(), StatusCode::OK);
+        let second_body = to_bytes(second_resp.into_body(), usize::MAX).await.expect("read second session body");
+        let second_json: serde_json::Value = serde_json::from_slice(&second_body).expect("parse second session json");
+        let second_session = second_json["data"].clone();
+        assert_eq!(second_session["attempt_no"], 2);
+        assert_eq!(second_session["parent_session_id"], first_session_id);
+
+        let parent_status: Option<String> = sqlx::query_scalar(
+            "SELECT status FROM sessions WHERE id = $1 LIMIT 1",
+        )
+        .bind(first_session_id)
+        .fetch_optional(pool.as_ref())
+        .await
+        .expect("query first session status");
+        assert_eq!(parent_status.as_deref(), Some("closed"));
+
+        let active_session_id: Option<String> = sqlx::query_scalar(
+            "SELECT active_session_id FROM tasks WHERE id = $1 LIMIT 1",
+        )
+        .bind("task-1")
+        .fetch_optional(pool.as_ref())
+        .await
+        .expect("query active session id")
+        .flatten();
+        assert_eq!(
+            active_session_id.as_deref(),
+            second_session["id"].as_str(),
+            "newest session should become active session"
+        );
+
+        let task_attempt_tracking: (Option<String>, i64) = sqlx::query_as(
+            "SELECT last_attempt_summary, attempt_count FROM tasks WHERE id = $1 LIMIT 1",
+        )
+        .bind("task-1")
+        .fetch_one(pool.as_ref())
+        .await
+        .expect("query task attempt tracking");
+        assert_eq!(task_attempt_tracking.1, 2);
+        assert_eq!(
+            task_attempt_tracking.0.as_deref(),
+            Some("Started a revision session in the active workspace")
+        );
+
+        if db_dir.exists() {
+            let _ = std::fs::remove_dir_all(db_dir);
+        }
+    }
+
+    #[tokio::test]
+    async fn delete_workspace_should_archive_and_switch_active_workspace() {
+        let (process_manager, db_dir) = create_test_process_manager_with_db().await;
+        let pool = get_db_pool_from_manager(&process_manager)
+            .await
+            .expect("db pool available");
+        let now = chrono::Utc::now().timestamp();
+        sqlx::query(
+            "INSERT INTO projects (id, name, repo_path, target_branch, created_at, updated_at) VALUES ($1, $2, $3, $4, $5, $6)",
+        )
+        .bind("project-1")
+        .bind("Project")
+        .bind("/tmp/project")
+        .bind("main")
+        .bind(now)
+        .bind(now)
+        .execute(pool.as_ref())
+        .await
+        .expect("insert project");
+        sqlx::query(
+            "INSERT INTO tasks (id, project_id, title, description, status, agent_cli, task_type, active_workspace_id, created_at, updated_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
+        )
+        .bind("task-1")
+        .bind("project-1")
+        .bind("Task")
+        .bind("Task")
+        .bind("done")
+        .bind("OPENCODE")
+        .bind("direct")
+        .bind("ws-1")
+        .bind(now)
+        .bind(now)
+        .execute(pool.as_ref())
+        .await
+        .expect("insert task");
+        sqlx::query(
+            "INSERT INTO workspaces (id, task_id, branch, role, agent_working_dir, agent_cli, archived, pinned, created_at, updated_at) VALUES ($1, $2, $3, $4, $5, $6, 0, 0, $7, $8)",
+        )
+        .bind("ws-1")
+        .bind("task-1")
+        .bind("feature/one")
+        .bind("primary")
+        .bind("/tmp/project")
+        .bind("OPENCODE")
+        .bind(now)
+        .bind(now)
+        .execute(pool.as_ref())
+        .await
+        .expect("insert primary workspace");
+        sqlx::query(
+            "INSERT INTO workspaces (id, task_id, branch, role, agent_working_dir, agent_cli, archived, pinned, created_at, updated_at) VALUES ($1, $2, $3, $4, $5, $6, 0, 0, $7, $8)",
+        )
+        .bind("ws-2")
+        .bind("task-1")
+        .bind("feature/two")
+        .bind("fork")
+        .bind("/tmp/project")
+        .bind("OPENCODE")
+        .bind(now + 1)
+        .bind(now + 1)
+        .execute(pool.as_ref())
+        .await
+        .expect("insert replacement workspace");
+        sqlx::query(
+            "INSERT INTO sessions (id, workspace_id, agent_cli, status, attempt_no, parent_session_id, created_at, updated_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
+        )
+        .bind("sess-1")
+        .bind("ws-1")
+        .bind("OPENCODE")
+        .bind("running")
+        .bind(1_i64)
+        .bind(Option::<String>::None)
+        .bind(now)
+        .bind(now)
+        .execute(pool.as_ref())
+        .await
+        .expect("insert first session");
+        sqlx::query(
+            "INSERT INTO sessions (id, workspace_id, agent_cli, status, attempt_no, parent_session_id, created_at, updated_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
+        )
+        .bind("sess-2")
+        .bind("ws-2")
+        .bind("OPENCODE")
+        .bind("running")
+        .bind(1_i64)
+        .bind(Option::<String>::None)
+        .bind(now + 1)
+        .bind(now + 1)
+        .execute(pool.as_ref())
+        .await
+        .expect("insert replacement session");
+        sqlx::query("UPDATE tasks SET active_session_id = $1 WHERE id = $2")
+            .bind("sess-1")
+            .bind("task-1")
+            .execute(pool.as_ref())
+            .await
+            .expect("set active session");
+
+        let app = create_router(HttpServerState { process_manager });
+        let req = Request::builder()
+            .method(Method::DELETE)
+            .uri("/api/workspaces/ws-1")
+            .body(Body::empty())
+            .expect("build delete workspace request");
+        let resp = app.clone().oneshot(req).await.expect("delete workspace");
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let archived: Option<i64> = sqlx::query_scalar(
+            "SELECT archived FROM workspaces WHERE id = $1 LIMIT 1",
+        )
+        .bind("ws-1")
+        .fetch_optional(pool.as_ref())
+        .await
+        .expect("query archived flag");
+        assert_eq!(archived, Some(1));
+
+        let replacement_role: Option<String> = sqlx::query_scalar(
+            "SELECT role FROM workspaces WHERE id = $1 LIMIT 1",
+        )
+        .bind("ws-2")
+        .fetch_optional(pool.as_ref())
+        .await
+        .expect("query replacement role");
+        assert_eq!(replacement_role.as_deref(), Some("primary"));
+
+        let task_row = sqlx::query(
+            "SELECT active_workspace_id, active_session_id FROM tasks WHERE id = $1 LIMIT 1",
+        )
+        .bind("task-1")
+        .fetch_one(pool.as_ref())
+        .await
+        .expect("query task active pointers");
+        let active_workspace_id: Option<String> = task_row.try_get("active_workspace_id").ok();
+        let active_session_id: Option<String> = task_row.try_get("active_session_id").ok();
+        assert_eq!(active_workspace_id.as_deref(), Some("ws-2"));
+        assert_eq!(active_session_id.as_deref(), Some("sess-2"));
+
+        if db_dir.exists() {
+            let _ = std::fs::remove_dir_all(db_dir);
+        }
+    }
+
+    #[tokio::test]
+    async fn delete_workspace_should_reject_non_terminal_task_status() {
+        let (process_manager, db_dir) = create_test_process_manager_with_db().await;
+        let pool = get_db_pool_from_manager(&process_manager)
+            .await
+            .expect("db pool available");
+        let now = chrono::Utc::now().timestamp();
+        sqlx::query(
+            "INSERT INTO projects (id, name, repo_path, target_branch, created_at, updated_at) VALUES ($1, $2, $3, $4, $5, $6)",
+        )
+        .bind("project-1")
+        .bind("Project")
+        .bind("/tmp/project")
+        .bind("main")
+        .bind(now)
+        .bind(now)
+        .execute(pool.as_ref())
+        .await
+        .expect("insert project");
+        sqlx::query(
+            "INSERT INTO tasks (id, project_id, title, description, status, agent_cli, task_type, created_at, updated_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
+        )
+        .bind("task-1")
+        .bind("project-1")
+        .bind("Task")
+        .bind("Task")
+        .bind("inprogress")
+        .bind("OPENCODE")
+        .bind("direct")
+        .bind(now)
+        .bind(now)
+        .execute(pool.as_ref())
+        .await
+        .expect("insert task");
+        sqlx::query(
+            "INSERT INTO workspaces (id, task_id, branch, role, agent_working_dir, agent_cli, archived, pinned, created_at, updated_at) VALUES ($1, $2, $3, $4, $5, $6, 0, 0, $7, $8)",
+        )
+        .bind("ws-1")
+        .bind("task-1")
+        .bind("feature/one")
+        .bind("primary")
+        .bind("/tmp/project")
+        .bind("OPENCODE")
+        .bind(now)
+        .bind(now)
+        .execute(pool.as_ref())
+        .await
+        .expect("insert workspace");
+
+        let app = create_router(HttpServerState { process_manager });
+        let req = Request::builder()
+            .method(Method::DELETE)
+            .uri("/api/workspaces/ws-1")
+            .body(Body::empty())
+            .expect("build delete workspace request");
+        let resp = app.clone().oneshot(req).await.expect("delete workspace");
+        assert_eq!(resp.status(), StatusCode::CONFLICT);
+
+        let archived: Option<i64> = sqlx::query_scalar(
+            "SELECT archived FROM workspaces WHERE id = $1 LIMIT 1",
+        )
+        .bind("ws-1")
+        .fetch_optional(pool.as_ref())
+        .await
+        .expect("query archived flag");
+        assert_eq!(archived, Some(0));
 
         if db_dir.exists() {
             let _ = std::fs::remove_dir_all(db_dir);

@@ -11,6 +11,10 @@ export interface Task {
   description: string
   status: TaskStatus
   task_type: TaskType
+  active_workspace_id?: string
+  active_session_id?: string
+  last_attempt_summary?: string
+  attempt_count?: number
   direct_branch?: string
   agent_cli?: string
   model_id?: string
@@ -51,6 +55,7 @@ export interface Workspace {
   id: string
   task_id: string
   branch: string
+  role?: 'primary' | 'retry' | 'fork'
   agent_working_dir?: string
   setup_completed_at?: string
   archived: boolean
@@ -64,6 +69,9 @@ export interface Session {
   id: string
   workspace_id: string
   agent_profile: AgentProfile
+  status: 'running' | 'inreview' | 'closed' | 'failed'
+  attempt_no: number
+  parent_session_id?: string | null
   created_at: string
   updated_at: string
 }

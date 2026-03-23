@@ -138,7 +138,8 @@
     "startExecution": "开始执行",
     "startWithExistingWorktree": "将使用已有 Worktree 启动 Agent",
     "startWithNewWorktree": "将自动创建 Worktree 并使用任务描述启动 Agent",
-    "starting": "正在启动..."
+    "starting": "正在启动...",
+    "modelPreferenceInvalidFallback": "你上次选择的模型「{modelId}」当前不可用，已自动回退到可用默认模型。"
   },
   "createProject": {
     "nameRequired": "项目名称是必填项。",

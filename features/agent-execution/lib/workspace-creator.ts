@@ -77,6 +77,14 @@ export interface WorktreeInfo {
   baseBranch?: string  // 新增：目标分支（用户选择的分支）
 }
 
+const DEFAULT_INHERITED_FILES = [
+  'CLAUDE.md',
+  'AGENTS.md',
+  'opencode.json',
+  '.opencode/oh-my-opencode.jsonc',
+  '.opencode/skills/**',
+] as const
+
 export interface WorktreeStatus {
   has_uncommitted_changes: boolean
   files_changed: number
@@ -241,9 +249,13 @@ export async function createWorkspace(
     await runSetupScript(config.setupScript, worktreePath)
   }
 
-  // 如果有需要拷贝的文件
-  if (config.copyFiles && config.copyFiles.length > 0) {
-    await copyFiles(config.copyFiles, worktreePath)
+  // normal 模式默认继承项目规则文件，除非调用方显式传入其他白名单。
+  const filesToCopy = config.copyFiles && config.copyFiles.length > 0
+    ? config.copyFiles
+    : [...DEFAULT_INHERITED_FILES]
+
+  if (filesToCopy.length > 0) {
+    await copyFiles(config.repoPath, filesToCopy, worktreePath)
   }
 
   return {
@@ -319,7 +331,10 @@ async function runSetupScript(_script: string, _worktreePath: string): Promise<v
 /**
  * 拷贝配置文件
  */
-async function copyFiles(_files: string[], _worktreePath: string): Promise<void> {
-  // TODO: 实现文件拷贝
-  // 可以通过 Tauri fs plugin 或自定义 command 执行
+async function copyFiles(sourceRepoPath: string, files: string[], worktreePath: string): Promise<void> {
+  await httpRequest('/api/workspaces/copy-files', {
+    source_repo_path: sourceRepoPath,
+    target_worktree_path: worktreePath,
+    files,
+  })
 }
